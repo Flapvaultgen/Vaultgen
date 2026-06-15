@@ -1,0 +1,107 @@
+import { useEffect, useRef, useState } from "react";
+import { Loader2, MessageSquare, Plus, Send } from "lucide-react";
+import { Button } from "./ui/button";
+import { Textarea } from "./ui/textarea";
+import { cn } from "../lib/utils";
+
+export type ChatUiMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  pending?: boolean;
+};
+
+type Props = {
+  messages: ChatUiMessage[];
+  running: boolean;
+  statusMsg: string | null;
+  contractName: string | null;
+  onSend: (text: string) => void;
+  onNewVault: () => void;
+};
+
+export default function CodegenChatPanel({ messages, running, statusMsg, contractName, onSend, onNewVault }: Props) {
+  const [input, setInput] = useState("");
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, running, statusMsg]);
+
+  const submit = () => {
+    const text = input.trim();
+    if (text.length < 2 || running) return;
+    setInput("");
+    onSend(text);
+  };
+
+  return (
+    <div className="flex h-full min-h-[520px] flex-col rounded-xl border border-border bg-card/40">
+      <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <MessageSquare className="size-4 shrink-0 text-accent" />
+          <div className="min-w-0">
+            <p className="text-sm font-medium">Refine in chat</p>
+            {contractName && (
+              <p className="truncate font-mono text-[0.65rem] text-muted-foreground">{contractName}.sol</p>
+            )}
+          </div>
+        </div>
+        <Button variant="ghost" size="sm" onClick={onNewVault} className="shrink-0 gap-1.5 text-xs">
+          <Plus className="size-3.5" />
+          New vault
+        </Button>
+      </div>
+
+      <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+        {messages.map((m) => (
+          <div
+            key={m.id}
+            className={cn(
+              "max-w-[95%] rounded-lg px-3 py-2 text-sm leading-relaxed",
+              m.role === "user"
+                ? "ml-auto bg-accent/15 text-foreground"
+                : "mr-auto border border-border bg-secondary/30 text-foreground/90"
+            )}
+          >
+            {m.pending ? (
+              <span className="flex items-center gap-2 text-muted-foreground">
+                <Loader2 className="size-3.5 animate-spin" />
+                Updating vault…
+              </span>
+            ) : (
+              m.content
+            )}
+          </div>
+        ))}
+        {running && statusMsg && (
+          <p className="text-center text-xs text-muted-foreground">{statusMsg}</p>
+        )}
+        <div ref={bottomRef} />
+      </div>
+
+      <div className="border-t border-border p-3">
+        <div className="flex gap-2">
+          <Textarea
+            rows={2}
+            placeholder="e.g. add a 24h cooldown on treasury withdraw, expose totalStaked in the UI schema…"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                submit();
+              }
+            }}
+            disabled={running}
+            className="min-h-[72px] resize-none text-sm"
+          />
+          <Button variant="accent" onClick={submit} disabled={running || input.trim().length < 2} className="shrink-0 self-end">
+            {running ? <Loader2 className="animate-spin" /> : <Send className="size-4" />}
+          </Button>
+        </div>
+        <p className="mt-2 text-[0.65rem] text-muted-foreground">Enter to send · Shift+Enter for newline</p>
+      </div>
+    </div>
+  );
+}
