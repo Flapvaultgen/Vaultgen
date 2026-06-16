@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch index.ts",
+    "build": "tsc --noEmit",
     "start": "tsx index.ts",
     "test:scanners": "tsx scanner-selfcheck.mts"
   },

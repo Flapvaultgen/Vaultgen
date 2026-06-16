@@ -1,0 +1,15 @@
+.git
+.agents
+.ai
+**/node_modules
+web/dist
+web/node_modules
+server/verify-runs
+server/verify-strong-runs
+server/e2e-runs
+cache
+out
+src/_codegen
+*.env
+*.env.*
+!server/.env.example

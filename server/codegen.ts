@@ -11,7 +11,11 @@ const execAsync = promisify(exec);
 
 // Repo root is one level up from /server.
 const REPO_ROOT = path.resolve(process.cwd(), "..");
-const FORGE = path.join(os.homedir(), ".foundry", "bin", "forge");
+const FORGE =
+  process.env.FORGE_PATH ??
+  (existsSync(path.join(os.homedir(), ".foundry", "bin", "forge"))
+    ? path.join(os.homedir(), ".foundry", "bin", "forge")
+    : "forge");
 const CODEGEN_DIR = path.join(REPO_ROOT, "src", "_codegen");
 
 export type SafetyLevel = "pass" | "warn" | "fail";

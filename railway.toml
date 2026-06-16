@@ -1,9 +1,8 @@
-# Deploy from repo root. Railway runs the AI/codegen API (needs Foundry + full Solidity tree).
+# Railway: Docker build (Node 22 + Foundry). Set OPENAI_API_KEY in Railway Variables.
 [build]
-builder = "NIXPACKS"
-buildCommand = "curl -L https://foundry.paradigm.xyz | bash && export PATH=\"$HOME/.foundry/bin:$PATH\" && foundryup && cd server && npm ci"
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "cd server && npm start"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
