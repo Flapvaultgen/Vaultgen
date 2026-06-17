@@ -10,7 +10,9 @@ import { runSpecAudit } from "./spec-audit.js";
 const app = express();
 const port = Number(process.env.PORT ?? 3002);
 
-const corsOrigins = process.env.CORS_ORIGIN?.split(",").map((s) => s.trim()).filter(Boolean);
+const corsOrigins = process.env.CORS_ORIGIN?.split(",")
+  .map((s) => s.trim().replace(/\/$/, ""))
+  .filter(Boolean);
 app.use(
   cors(
     corsOrigins?.length
@@ -19,6 +21,14 @@ app.use(
   )
 );
 app.use(express.json({ limit: "2mb" }));
+
+app.get("/", (_req, res) => {
+  res.json({
+    service: "FlapVaultGen API",
+    health: "/api/health",
+    ok: true,
+  });
+});
 
 app.get("/api/health", (_req, res) => {
   res.json({
