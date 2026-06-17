@@ -15,7 +15,7 @@ app.use(
   cors(
     corsOrigins?.length
       ? { origin: corsOrigins, credentials: true }
-      : undefined
+      : { origin: true }
   )
 );
 app.use(express.json({ limit: "2mb" }));
@@ -137,7 +137,7 @@ app.post("/api/spec-audit", async (req, res) => {
   }
 });
 
-app.listen(port, () => {
+app.listen(port, "0.0.0.0", () => {
   console.log(`Origin Vault AI server http://localhost:${port}`);
   console.log(`Mode: ${process.env.OPENAI_API_KEY ? "OpenAI" : "stub (set OPENAI_API_KEY)"}`);
 });

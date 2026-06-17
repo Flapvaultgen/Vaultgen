@@ -1,5 +1,6 @@
 {
   "factoryAddress": "",
-  "productName": "Origin Composer",
-  "flapLaunch": "https://flap.sh/launch"
+  "productName": "FlapVaultGen",
+  "flapLaunch": "https://flap.sh/launch",
+  "apiUrl": "https://example.up.railway.app"
 }

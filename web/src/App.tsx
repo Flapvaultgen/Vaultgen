@@ -4,7 +4,7 @@ import CodegenStudio from "./CodegenStudio";
 import DocsPage from "./DocsPage";
 import MetaMaskConnect from "./components/MetaMaskConnect";
 import { Button } from "./components/ui/button";
-import { apiUrl } from "./lib/api-base";
+import { apiUrl, initApiBase } from "./lib/api-base";
 import { cn } from "./lib/utils";
 
 export default function App() {
@@ -13,10 +13,15 @@ export default function App() {
   const [wideLayout, setWideLayout] = useState(false);
 
   useEffect(() => {
-    fetch(apiUrl("/api/health"))
-      .then((r) => r.json())
-      .then((h) => setAiMode(h.aiMode === "openai" ? "OpenAI" : "no API key"))
-      .catch(() => setAiMode("offline"));
+    void initApiBase().then((base) =>
+      fetch(apiUrl("/api/health"))
+        .then((r) => {
+          if (!r.ok) throw new Error(String(r.status));
+          return r.json();
+        })
+        .then((h) => setAiMode(h.aiMode === "openai" ? "OpenAI" : "no API key"))
+        .catch(() => setAiMode(base ? "offline" : "no API URL"))
+    );
   }, []);
 
   if (view === "docs") {

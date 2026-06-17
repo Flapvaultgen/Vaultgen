@@ -7,7 +7,7 @@
     "dev": "vite",
     "dev:server": "npm --prefix ../server run dev",
     "dev:all": "concurrently -n web,ai -c blue,magenta \"vite\" \"npm --prefix ../server run dev\"",
-    "build": "tsc && vite build",
+    "build": "node scripts/write-config.mjs && tsc && vite build",
     "preview": "vite preview"
   },
   "dependencies": {

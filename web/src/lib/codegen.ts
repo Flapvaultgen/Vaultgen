@@ -49,7 +49,7 @@ export type RefineSession = {
   chatHistory: RefineChatTurn[];
 };
 
-import { apiUrl } from "./api-base";
+import { apiUrl, initApiBase } from "./api-base";
 
 export type CodegenEvent =
   | { type: "status"; phase: "writing" | "fixing" | "fixing_spec" | "compiling" | "compile_failed" | "auditing" | "generating_tests" | "done" | "error"; attempt: number; message?: string }
@@ -87,6 +87,7 @@ async function consumeSse(res: Response, onEvent: (ev: CodegenEvent) => void): P
 }
 
 export async function streamVault(prompt: string, onEvent: (ev: CodegenEvent) => void): Promise<void> {
+  await initApiBase();
   let res: Response;
   try {
     res = await fetch(apiUrl("/api/codegen-vault-stream"), {
@@ -109,6 +110,7 @@ export async function streamVaultRefine(
   session: RefineSession,
   onEvent: (ev: CodegenEvent) => void
 ): Promise<void> {
+  await initApiBase();
   let res: Response;
   try {
     res = await fetch(apiUrl("/api/codegen-vault-refine-stream"), {
@@ -127,6 +129,7 @@ export async function streamVaultRefine(
 }
 
 export async function generateVault(prompt: string): Promise<CodegenResult> {
+  await initApiBase();
   let res: Response;
   try {
     res = await fetch(apiUrl("/api/codegen-vault"), {
