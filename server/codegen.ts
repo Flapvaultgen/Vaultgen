@@ -604,6 +604,49 @@ function extractFunctionChunks(source: string): { name: string; body: string; he
   return chunks;
 }
 
+function findFunctionBody(source: string, fnName: string): string | null {
+  return extractFunctionChunks(source).find((f) => f.name === fnName)?.body ?? null;
+}
+
+function replaceFunctionBody(source: string, fnName: string, newBody: string): string {
+  const re = new RegExp(`function\\s+${fnName}\\s*\\([^)]*\\)[^{]*\\{`, "g");
+  const m = re.exec(source);
+  if (!m) return source;
+  const start = m.index + m[0].length;
+  let i = start;
+  let depth = 1;
+  for (; i < source.length && depth > 0; i++) {
+    const c = source[i];
+    if (c === "{") depth++;
+    else if (c === "}") depth--;
+  }
+  return source.slice(0, start) + newBody + source.slice(i - 1);
+}
+
+/** Deterministic fixes for patterns the AI often misses after many retries. */
+function applyCommonCodegenPatches(code: string): string {
+  let out = code;
+
+  if (/FlapAIConsumerBase/.test(out) && /lastDrawFee/.test(out)) {
+    const fulfillBody = findFunctionBody(out, "_fulfillReasoning");
+    if (fulfillBody && !/lastDrawFee\s*=\s*0/.test(fulfillBody)) {
+      out = replaceFunctionBody(out, "_fulfillReasoning", `${fulfillBody.trimEnd()}\n        lastDrawFee = 0;\n    `);
+    }
+  }
+
+  for (const fnName of ["requestDraw", "requestElimination"] as const) {
+    const body = findFunctionBody(out, fnName);
+    if (!body || !/uint8\s*\(\s*(?:n|entrants\.length|drawSnapshot\.length)/.test(body)) continue;
+    if (/<=\s*255|<=\s*type\s*\(\s*uint8\s*\)\.max|MAX_ENTRANTS/.test(body)) continue;
+    const guard = body.includes("drawSnapshot.length")
+      ? 'require(drawSnapshot.length > 0 && drawSnapshot.length <= type(uint8).max, unicode"Invalid entrant count / 无效参与者数量");\n        '
+      : 'require(n > 0 && n <= type(uint8).max, unicode"Invalid entrant count / 无效参与者数量");\n        ';
+    out = replaceFunctionBody(out, fnName, `${guard}${body.trimStart()}`);
+  }
+
+  return out;
+}
+
 function hasAsciiOnlyRequire(source: string): boolean {
   // Flap UI expects unicode"English / 中文" — flag bare require(..., "ascii") in child contract.
   return /require\s*\(\s*[^)]+\s*,\s*"(?!.*\/)[^"]*"\s*\)/.test(source);
@@ -714,8 +757,8 @@ export function scanVaultLogic(source: string, userPrompt = ""): string[] {
       issues.push("Weekly timer on enter() instead of requestDraw only");
     }
     if (/hasEntered/.test(source) && /delete\s+entrants|_fulfillReasoning/.test(source)) {
-      const fulfill = source.match(/function _fulfillReasoning[\s\S]*?^\s*\}/m)?.[0] ?? "";
-      if (fulfill && !/hasEntered[\s\S]{0,200}=\s*false/.test(fulfill)) {
+      const fulfillBody = findFunctionBody(source, "_fulfillReasoning") ?? "";
+      if (fulfillBody && !/hasEntered[\s\S]{0,400}=\s*false/.test(fulfillBody)) {
         issues.push("hasEntered mapping never reset when round ends");
       }
     }
@@ -751,20 +794,20 @@ export function scanVaultLogic(source: string, userPrompt = ""): string[] {
 
   // AI async lifecycle.
   if (/FlapAIConsumerBase/.test(source) && /lastDrawFee|DrawFee/.test(source)) {
-    const fulfill = source.match(/function _fulfillReasoning[\s\S]*?^\s*\}/m)?.[0] ?? "";
-    if (fulfill && /lastDrawFee/.test(source) && !/lastDrawFee\s*=\s*0/.test(fulfill)) {
+    const fulfillBody = findFunctionBody(source, "_fulfillReasoning") ?? "";
+    if (fulfillBody && /lastDrawFee/.test(source) && !/lastDrawFee\s*=\s*0/.test(fulfillBody)) {
       issues.push("lastDrawFee not cleared after successful fulfillment");
     }
-    const refund = source.match(/function _onFlapAIRequestRefunded[\s\S]*?^\s*\}/m)?.[0] ?? "";
-    if (refund && /drawSnapshot/.test(source) && !/delete drawSnapshot/.test(refund)) {
+    const refundBody = findFunctionBody(source, "_onFlapAIRequestRefunded") ?? "";
+    if (refundBody && /drawSnapshot/.test(source) && !/delete drawSnapshot/.test(refundBody)) {
       issues.push("AI refund handler does not clear stale drawSnapshot");
     }
   }
 
   if (/uint8\s*\(\s*(?:n|entrants\.length|drawSnapshot\.length)/.test(source)) {
-    const reqDraw = source.match(/function requestDraw[\s\S]*?^\s*\}/m)?.[0] ?? "";
-    const reqElim = source.match(/function requestElimination[\s\S]*?^\s*\}/m)?.[0] ?? "";
-    const guard = reqDraw + reqElim;
+    const reqDrawBody = findFunctionBody(source, "requestDraw") ?? "";
+    const reqElimBody = findFunctionBody(source, "requestElimination") ?? "";
+    const guard = reqDrawBody + reqElimBody;
     if (!/<=\s*255|<=\s*type\s*\(\s*uint8\s*\)\.max|MAX_ENTRANTS/.test(guard)) {
       issues.push("uint8 entrant cast without require(n <= 255) guard");
     }
@@ -1517,6 +1560,7 @@ export function scanSafety(
   }
 
   for (const detail of scanVaultLogic(source, userPrompt)) {
+    if (findings.some((f) => f.detail === detail)) continue;
     add("block", "vault-logic", detail);
   }
 
@@ -1629,8 +1673,15 @@ export type CodegenStatusPhase =
   | "error";
 
 export type CodegenEvent =
-  | { type: "status"; phase: CodegenStatusPhase; attempt: number; message?: string }
-  | { type: "code_reset"; attempt: number }
+  | { type: "status"; phase: CodegenStatusPhase; attempt: number; maxAttempts?: number; message?: string }
+  | {
+      type: "code_reset";
+      attempt: number;
+      reason: "initial" | "retry";
+      retryKind?: FixLogEntry["phase"];
+      message?: string;
+    }
+  | { type: "fix_log"; entry: FixLogEntry }
   | { type: "code_delta"; delta: string }
   | { type: "name"; contractName: string }
   | { type: "explanation"; text: string }
@@ -1660,14 +1711,74 @@ async function aiGenerateJson(
   };
 }
 
+function humanStatusMessage(phase: CodegenStatusPhase, attempt: number, message?: string): string | undefined {
+  switch (phase) {
+    case "writing":
+      return attempt <= 1 ? "Drafting your vault contract from scratch…" : "AI is rewriting the contract…";
+    case "compiling":
+      return "Compiling with solc (Foundry)…";
+    case "compile_failed":
+      return message
+        ? `Compile failed — will retry: ${message.slice(0, 140)}`
+        : "Compile failed — sending the draft back to AI to fix…";
+    case "fixing":
+      return message ? `Fixing safety issues (${message})…` : "Fixing safety scanner issues…";
+    case "fixing_spec":
+      return message ? `Fixing Flap spec rules (${message})…` : "Fixing Flap spec compliance…";
+    case "generating_tests":
+      return message ?? "Generating integration test (Rule 006)…";
+    case "auditing":
+      return message ?? "Running Flap pre-audit (spec checker)…";
+    default:
+      return message;
+  }
+}
+
+function describeCodeReset(lastFix: FixLogEntry | undefined, attempt: number): Pick<
+  Extract<CodegenEvent, { type: "code_reset" }>,
+  "reason" | "retryKind" | "message"
+> {
+  if (attempt <= 1 || !lastFix) {
+    return { reason: "initial" };
+  }
+  const kind = lastFix.phase;
+  if (kind === "compile_fix") {
+    return {
+      reason: "retry",
+      retryKind: kind,
+      message: `Previous draft did not compile. Starting pass ${attempt} with a fresh rewrite.`,
+    };
+  }
+  if (kind === "safety_fix") {
+    return {
+      reason: "retry",
+      retryKind: kind,
+      message: `Safety scanner blocked the draft${lastFix.rule ? ` (${lastFix.rule})` : ""}. Starting pass ${attempt} to fix it.`,
+    };
+  }
+  if (kind === "spec_fix") {
+    return {
+      reason: "retry",
+      retryKind: kind,
+      message: `Flap pre-audit found issues${lastFix.rule ? ` (${lastFix.rule})` : ""}. Starting pass ${attempt} to fix them.`,
+    };
+  }
+  return {
+    reason: "retry",
+    retryKind: kind,
+    message: `Starting pass ${attempt} — rewriting the contract.`,
+  };
+}
+
 async function aiGenerateStream(
   client: import("openai").default,
   model: string,
   messages: ChatMessage[],
   emit: (ev: CodegenEvent) => void,
-  attempt: number
+  attempt: number,
+  lastFix?: FixLogEntry
 ): Promise<{ raw: string; contractName: string; code: string; explanation: string }> {
-  emit({ type: "code_reset", attempt });
+  emit({ type: "code_reset", attempt, ...describeCodeReset(lastFix, attempt) });
   const stream = await client.chat.completions.create({
     model,
     temperature: 0.2,
@@ -1747,7 +1858,18 @@ async function runCodegenPipeline(opts: {
   let pendingFix: string | null = null;
 
   const status = (phase: CodegenStatusPhase, message?: string) => {
-    emit?.({ type: "status", phase, attempt: attempts, message });
+    emit?.({
+      type: "status",
+      phase,
+      attempt: attempts,
+      maxAttempts: MAX_PIPELINE_ATTEMPTS,
+      message: humanStatusMessage(phase, attempts, message),
+    });
+  };
+
+  const pushFix = (entry: FixLogEntry) => {
+    fixLog.push(entry);
+    emit?.({ type: "fix_log", entry });
   };
 
   while (attempts < MAX_PIPELINE_ATTEMPTS) {
@@ -1757,11 +1879,12 @@ async function runCodegenPipeline(opts: {
     }
 
     attempts++;
-    status(attempts === 1 ? "writing" : "fixing");
+    const lastFix = attempts > 1 ? fixLog[fixLog.length - 1] : undefined;
+    status(attempts === 1 ? "writing" : lastFix?.phase === "spec_fix" ? "fixing_spec" : "fixing");
 
     let lastAssistant: string;
     if (stream && emit) {
-      const gen = await aiGenerateStream(client, model, messages, emit, attempts);
+      const gen = await aiGenerateStream(client, model, messages, emit, attempts, lastFix);
       lastAssistant = gen.raw;
       contractName = gen.contractName;
       code = gen.code;
@@ -1777,6 +1900,8 @@ async function runCodegenPipeline(opts: {
     emit?.({ type: "name", contractName });
     emit?.({ type: "explanation", text: explanation });
 
+    code = applyCommonCodegenPatches(code);
+
     status("compiling");
     const res = await compile(contractName, code);
     ok = res.ok;
@@ -1785,7 +1910,7 @@ async function runCodegenPipeline(opts: {
     filePath = res.filePath;
 
     if (!ok) {
-      fixLog.push({ phase: "compile_fix", attempt: attempts, message: firstErrors(compileErrors) });
+      pushFix({ phase: "compile_fix", attempt: attempts, message: firstErrors(compileErrors) });
       status("compile_failed", firstErrors(compileErrors));
       messages.push({ role: "assistant", content: lastAssistant });
       pendingFix = stream ? compileFixPromptStream(compileErrors) : compileFixPrompt(compileErrors);
@@ -1795,7 +1920,7 @@ async function runCodegenPipeline(opts: {
     safety = scanSafety(code, contractName, safetyPrompt);
     const blocking = safety.findings.filter((f) => f.level === "block");
     if (blocking.length > 0) {
-      fixLog.push({
+      pushFix({
         phase: "safety_fix",
         attempt: attempts,
         rule: blocking.map((b) => b.rule).join(","),
@@ -1803,7 +1928,15 @@ async function runCodegenPipeline(opts: {
       });
       status("fixing", blocking.map((b) => b.rule).join(", "));
       messages.push({ role: "assistant", content: lastAssistant });
-      pendingFix = stream ? safetyFixPromptStream(blocking) : safetyFixPrompt(blocking);
+      const recentSafety = fixLog.filter((f) => f.phase === "safety_fix").slice(-3);
+      const stuck =
+        recentSafety.length >= 3 &&
+        recentSafety.every((f) => f.message === recentSafety[0]!.message);
+      pendingFix = stuck
+        ? surgicalSafetyFixPrompt(blocking, recentSafety[0]!.message)
+        : stream
+          ? safetyFixPromptStream(blocking)
+          : safetyFixPrompt(blocking);
       continue;
     }
 
@@ -1821,9 +1954,9 @@ async function runCodegenPipeline(opts: {
     const tr = await generateIntegrationTest(contractName, artifactPath, fullSource, apiKey, model);
     if (tr.ok) {
       integrationTestPath = tr.path;
-      fixLog.push({ phase: "generating_tests", attempt: attempts, message: tr.path });
+      pushFix({ phase: "generating_tests", attempt: attempts, message: tr.path });
     } else {
-      fixLog.push({ phase: "generating_tests", attempt: attempts, message: tr.errors.slice(0, 160) });
+      pushFix({ phase: "generating_tests", attempt: attempts, message: tr.errors.slice(0, 160) });
     }
 
     status("auditing", "Flap pre-audit (spec checker)…");
@@ -1832,14 +1965,14 @@ async function runCodegenPipeline(opts: {
       safetyFindings: safety.findings,
     });
     emit?.({ type: "spec_audit", audit: specAudit });
-    fixLog.push({ phase: "auditing", attempt: attempts, message: `spec: ${specAudit.level}` });
+    pushFix({ phase: "auditing", attempt: attempts, message: `spec: ${specAudit.level}` });
 
     if (specAudit.level !== "fail") break;
 
     const fixable = specCodegenFixableItems(specAudit.items);
     if (fixable.length === 0) break;
 
-    fixLog.push({
+    pushFix({
       phase: "spec_fix",
       attempt: attempts,
       rule: fixable.map((f) => f.id).join(","),
@@ -1971,6 +2104,7 @@ export async function generateVaultCodeStream(
       type: "status",
       phase: full.compiled && full.specAudit.level !== "fail" ? "done" : "error",
       attempt: full.attempts,
+      maxAttempts: MAX_PIPELINE_ATTEMPTS,
       message:
         full.autoFixExhausted && full.specAudit.level === "fail"
           ? "Auto-fix exhausted — spec still has FAIL items."
@@ -2024,6 +2158,7 @@ export async function generateVaultCodeRefineStream(
       type: "status",
       phase: full.compiled && full.specAudit.level !== "fail" ? "done" : "error",
       attempt: full.attempts,
+      maxAttempts: MAX_PIPELINE_ATTEMPTS,
       message:
         full.autoFixExhausted && full.specAudit.level === "fail"
           ? "Auto-fix exhausted — spec still has FAIL items."
@@ -2096,7 +2231,29 @@ function safetyFixPromptStream(blocking: SafetyFinding[]): string {
 
 Quality bar: unicode bilingual requires; complete vaultUISchema (inputs/outputs/approvals on every method); view methods for public state; nonReentrant on payouts; events on state changes; lottery timing only on requestDraw (not enter); MAX_ENTRANTS <= 255; bucket emergencyWithdrawNative override; FlapAIConsumerBase for all random winner/elimination picks (never prevrandao).
 
+MANDATORY for AI lottery (_fulfillReasoning must include this before the closing brace):
+        lastDrawFee = 0;
+
+MANDATORY before uint8(n) in requestDraw:
+        require(n > 0 && n <= type(uint8).max, unicode"Invalid entrant count / 无效参与者数量");
+
 Blocking issues:
+
+${list}`;
+}
+
+function surgicalSafetyFixPrompt(blocking: SafetyFinding[], repeatedMessage: string): string {
+  const list = blocking.map((f) => `- [${f.rule}] ${f.detail}`).join("\n");
+  return `You have failed to fix the same blocking issue ${MAX_PIPELINE_ATTEMPTS > 3 ? "3+" : "multiple"} times: "${repeatedMessage}".
+
+Re-output the FULL contract in plain-text format (CONTRACT_NAME / EXPLANATION / SOLIDITY). Do not skip any function.
+
+Apply these exact fixes if relevant:
+1. Inside _fulfillReasoning, after paying the winner and clearing entrants/drawSnapshot, add: lastDrawFee = 0;
+2. Inside requestDraw, before uint8(n) or the AI request, add: require(n > 0 && n <= type(uint8).max, unicode"Invalid entrant count / 无效参与者数量");
+3. _onFlapAIRequestRefunded must: pendingRequestId = 0; jackpot += lastDrawFee; lastDrawFee = 0; delete drawSnapshot;
+
+Blocking issues still present:
 
 ${list}`;
 }

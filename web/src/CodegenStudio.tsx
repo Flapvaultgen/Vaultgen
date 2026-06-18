@@ -7,14 +7,9 @@ import {
   Check,
   CircleCheck,
   CircleX,
-  TriangleAlert,
   ShieldCheck,
   ShieldAlert,
   ShieldX,
-  PencilLine,
-  Hammer,
-  Wrench,
-  ClipboardCheck,
 } from "lucide-react";
 import {
   streamVault,
@@ -25,13 +20,14 @@ import {
   type RefineSession,
   type SpecAuditResult,
 } from "./lib/codegen";
+import { MAX_PIPELINE_ATTEMPTS, type CodeResetInfo, type PipelinePhase } from "./lib/pipeline-status";
 import CodegenChatPanel, { type ChatUiMessage } from "./components/CodegenChatPanel";
+import PipelineProgress from "./components/PipelineProgress";
 import SpecAuditPanel from "./components/SpecAuditPanel";
 import { Button } from "./components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "./components/ui/card";
 import { Textarea } from "./components/ui/textarea";
 import { Badge } from "./components/ui/badge";
-import { cn } from "./lib/utils";
 
 const EXAMPLES = [
   "Stake-to-earn: holders stake tokens and earn a share of tax BNB proportional to their stake",
@@ -46,16 +42,7 @@ const SAFETY = {
   fail: { label: "blocked", cls: "text-destructive", Icon: ShieldX, badge: "destructive" as const },
 };
 
-type Phase = "idle" | "writing" | "fixing" | "fixing_spec" | "compiling" | "compile_failed" | "auditing" | "generating_tests" | "done" | "error";
-
-const FIX_PHASE_LABEL: Record<FixLogEntry["phase"], string> = {
-  writing: "AI write",
-  compile_fix: "Compile fix",
-  safety_fix: "Safety fix",
-  spec_fix: "Spec fix",
-  generating_tests: "Test gen",
-  auditing: "Pre-audit",
-};
+type Phase = PipelinePhase;
 
 function specFailRules(audit: SpecAuditResult): string[] {
   return audit.items.filter((i) => i.status === "fail").map((i) => i.id);
@@ -64,14 +51,6 @@ function specFailRules(audit: SpecAuditResult): string[] {
 function uid(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
-
-const STAGES: { key: string; label: string; Icon: typeof PencilLine; phases: Phase[] }[] = [
-  { key: "write", label: "Writing Solidity", Icon: PencilLine, phases: ["writing", "fixing"] },
-  { key: "compile", label: "Compiling (solc)", Icon: Hammer, phases: ["compiling"] },
-  { key: "fix", label: "Auto-fixing", Icon: Wrench, phases: ["compile_failed", "fixing", "fixing_spec"] },
-  { key: "tests", label: "Integration tests", Icon: ClipboardCheck, phases: ["generating_tests"] },
-  { key: "audit", label: "Flap pre-audit", Icon: ClipboardCheck, phases: ["auditing"] },
-];
 
 type Props = {
   onChatActive?: (active: boolean) => void;
@@ -90,7 +69,10 @@ export default function CodegenStudio({ onChatActive }: Props) {
 
   const [phase, setPhase] = useState<Phase>("idle");
   const [attempt, setAttempt] = useState(0);
+  const [maxAttempts, setMaxAttempts] = useState(MAX_PIPELINE_ATTEMPTS);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [fixLog, setFixLog] = useState<FixLogEntry[]>([]);
+  const [resetInfo, setResetInfo] = useState<CodeResetInfo | null>(null);
   const [liveCode, setLiveCode] = useState("");
   const [liveName, setLiveName] = useState("");
   const [liveAudit, setLiveAudit] = useState<SpecAuditResult | null>(null);
@@ -115,8 +97,11 @@ export default function CodegenStudio({ onChatActive }: Props) {
     setLiveName("");
     setLiveAudit(null);
     setStatusMsg(null);
+    setFixLog([]);
+    setResetInfo(null);
     setPhase("idle");
     setAttempt(0);
+    setMaxAttempts(MAX_PIPELINE_ATTEMPTS);
     setRunning(false);
   }, []);
 
@@ -125,10 +110,20 @@ export default function CodegenStudio({ onChatActive }: Props) {
       case "status":
         setPhase(ev.phase);
         setAttempt(ev.attempt);
-        if (ev.message) setStatusMsg(ev.message);
+        if (ev.maxAttempts) setMaxAttempts(ev.maxAttempts);
+        setStatusMsg(ev.message ?? null);
         break;
       case "code_reset":
         setLiveCode("");
+        setResetInfo({
+          attempt: ev.attempt,
+          reason: ev.reason ?? (ev.attempt <= 1 ? "initial" : "retry"),
+          retryKind: ev.retryKind,
+          message: ev.message,
+        });
+        break;
+      case "fix_log":
+        setFixLog((prev) => [...prev, ev.entry]);
         break;
       case "code_delta":
         setLiveCode((c) => c + ev.delta);
@@ -138,6 +133,14 @@ export default function CodegenStudio({ onChatActive }: Props) {
         break;
       case "result":
         setResult(ev.result);
+        if (ev.result.fixLog.length > 0) setFixLog(ev.result.fixLog);
+        if (ev.result.safety.level === "fail" || !ev.result.compiled) {
+          setStatusMsg(
+            ev.result.attempts >= MAX_PIPELINE_ATTEMPTS
+              ? `Auto-fix stopped after ${ev.result.attempts} passes — ${ev.result.safety.findings.find((f) => f.level === "block")?.detail ?? "see safety scan"}`
+              : ev.result.safety.findings.find((f) => f.level === "block")?.detail ?? "Generation finished with issues"
+          );
+        }
         break;
       case "spec_audit":
         setLiveAudit(ev.audit);
@@ -166,7 +169,10 @@ export default function CodegenStudio({ onChatActive }: Props) {
     setLiveName("");
     setLiveAudit(null);
     setStatusMsg(null);
+    setFixLog([]);
+    setResetInfo(null);
     setAttempt(0);
+    setMaxAttempts(MAX_PIPELINE_ATTEMPTS);
     setPhase("writing");
     setRunning(true);
     try {
@@ -198,7 +204,10 @@ export default function CodegenStudio({ onChatActive }: Props) {
     setLiveName(result.contractName);
     setLiveAudit(null);
     setStatusMsg(null);
+    setFixLog([]);
+    setResetInfo(null);
     setAttempt(0);
+    setMaxAttempts(MAX_PIPELINE_ATTEMPTS);
     setPhase("writing");
     setRunning(true);
 
@@ -248,7 +257,17 @@ export default function CodegenStudio({ onChatActive }: Props) {
   const specFails = result ? specFailRules(result.specAudit) : [];
   const displaySource = running && liveCode ? liveCode : result?.source ?? "";
   const numberedSource = useMemo(() => (displaySource ? displaySource.split("\n") : []), [displaySource]);
-  const activeStageIdx = STAGES.findIndex((s) => s.phases.includes(phase));
+
+  const pipelineProgress = running ? (
+    <PipelineProgress
+      phase={phase}
+      attempt={attempt}
+      maxAttempts={maxAttempts}
+      statusMsg={statusMsg}
+      resetInfo={resetInfo}
+      fixLog={fixLog.length > 0 ? fixLog : result?.fixLog ?? []}
+    />
+  ) : null;
 
   const vaultPanel = result ? (
     <Card className="flex h-full min-h-[520px] flex-col">
@@ -269,26 +288,7 @@ export default function CodegenStudio({ onChatActive }: Props) {
         <CardDescription className="text-xs">{result.explanation}</CardDescription>
       </CardHeader>
       <CardContent className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden">
-        {running && (
-          <div className="flex flex-wrap items-center gap-2">
-            {STAGES.map((stage, i) => {
-              const active = i === activeStageIdx;
-              const done = activeStageIdx > i || phase === "done";
-              return (
-                <div
-                  key={stage.key}
-                  className={cn(
-                    "flex items-center gap-1 rounded-full border px-2 py-0.5 text-[0.65rem]",
-                    active ? "border-accent/50 bg-accent/10 text-accent" : done ? "text-success" : "text-muted-foreground"
-                  )}
-                >
-                  {active && <Loader2 className="size-3 animate-spin" />}
-                  {stage.label}
-                </div>
-              );
-            })}
-          </div>
-        )}
+        {pipelineProgress}
 
         <div className="min-h-0 flex-1 overflow-hidden rounded-lg border border-border">
           <div className="flex items-center justify-between border-b border-border bg-secondary/40 px-3 py-1.5">
@@ -351,7 +351,12 @@ export default function CodegenStudio({ onChatActive }: Props) {
           <CodegenChatPanel
             messages={chatMessages}
             running={running}
+            phase={phase}
+            attempt={attempt}
+            maxAttempts={maxAttempts}
             statusMsg={statusMsg}
+            resetInfo={resetInfo}
+            fixLog={fixLog}
             contractName={result?.contractName ?? liveName}
             onSend={onChatSend}
             onNewVault={resetAll}
@@ -400,7 +405,7 @@ export default function CodegenStudio({ onChatActive }: Props) {
           <div className="flex items-center gap-3">
             <Button variant="accent" onClick={onGenerate} disabled={running || prompt.trim().length < 8}>
               {running ? <Loader2 className="animate-spin" /> : <Sparkles />}
-              {running ? "Working…" : "Generate Solidity"}
+              {running ? "Generating…" : "Generate Solidity"}
             </Button>
             {error && <p className="text-sm text-destructive">{error}</p>}
           </div>
@@ -409,15 +414,15 @@ export default function CodegenStudio({ onChatActive }: Props) {
 
       {(running || liveCode) && !result && (
         <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Loader2 className={cn("size-4 animate-spin text-accent")} />
-              {liveName ? <span className="font-mono">{liveName}.sol</span> : "AI is building your vault…"}
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">
+              {liveName ? <span className="font-mono">{liveName}.sol</span> : "Building your vault"}
             </CardTitle>
+            {running && pipelineProgress && <div className="pt-1">{pipelineProgress}</div>}
           </CardHeader>
           <CardContent>
             <pre ref={codeRef} className="max-h-[420px] overflow-auto font-mono text-[0.72rem]">
-              <code className="whitespace-pre-wrap">{liveCode}</code>
+              <code className="whitespace-pre-wrap">{liveCode || "Waiting for Solidity stream…"}</code>
             </pre>
           </CardContent>
         </Card>

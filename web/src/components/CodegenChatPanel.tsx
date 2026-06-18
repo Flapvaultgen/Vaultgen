@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Loader2, MessageSquare, Plus, Send } from "lucide-react";
+import type { FixLogEntry } from "../lib/codegen";
+import { describePipelineHeadline, type CodeResetInfo, type PipelinePhase } from "../lib/pipeline-status";
+import PipelineProgress from "./PipelineProgress";
 import { Button } from "./ui/button";
 import { Textarea } from "./ui/textarea";
 import { cn } from "../lib/utils";
@@ -14,19 +17,36 @@ export type ChatUiMessage = {
 type Props = {
   messages: ChatUiMessage[];
   running: boolean;
+  phase: PipelinePhase;
+  attempt: number;
+  maxAttempts: number;
   statusMsg: string | null;
+  resetInfo: CodeResetInfo | null;
+  fixLog: FixLogEntry[];
   contractName: string | null;
   onSend: (text: string) => void;
   onNewVault: () => void;
 };
 
-export default function CodegenChatPanel({ messages, running, statusMsg, contractName, onSend, onNewVault }: Props) {
+export default function CodegenChatPanel({
+  messages,
+  running,
+  phase,
+  attempt,
+  maxAttempts,
+  statusMsg,
+  resetInfo,
+  fixLog,
+  contractName,
+  onSend,
+  onNewVault,
+}: Props) {
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, running, statusMsg]);
+  }, [messages, running, statusMsg, fixLog.length]);
 
   const submit = () => {
     const text = input.trim();
@@ -34,6 +54,10 @@ export default function CodegenChatPanel({ messages, running, statusMsg, contrac
     setInput("");
     onSend(text);
   };
+
+  const pendingHeadline = running
+    ? describePipelineHeadline(phase, attempt, maxAttempts, statusMsg)
+    : "Updating vault…";
 
   return (
     <div className="flex h-full min-h-[520px] flex-col rounded-xl border border-border bg-card/40">
@@ -65,18 +89,28 @@ export default function CodegenChatPanel({ messages, running, statusMsg, contrac
             )}
           >
             {m.pending ? (
-              <span className="flex items-center gap-2 text-muted-foreground">
-                <Loader2 className="size-3.5 animate-spin" />
-                Updating vault…
-              </span>
+              <div className="space-y-2">
+                <span className="flex items-center gap-2 text-muted-foreground">
+                  <Loader2 className="size-3.5 animate-spin" />
+                  {pendingHeadline}
+                </span>
+                {running && (
+                  <PipelineProgress
+                    compact
+                    phase={phase}
+                    attempt={attempt}
+                    maxAttempts={maxAttempts}
+                    statusMsg={statusMsg}
+                    resetInfo={resetInfo}
+                    fixLog={fixLog}
+                  />
+                )}
+              </div>
             ) : (
               m.content
             )}
           </div>
         ))}
-        {running && statusMsg && (
-          <p className="text-center text-xs text-muted-foreground">{statusMsg}</p>
-        )}
         <div ref={bottomRef} />
       </div>
 
@@ -84,7 +118,7 @@ export default function CodegenChatPanel({ messages, running, statusMsg, contrac
         <div className="flex gap-2">
           <Textarea
             rows={2}
-            placeholder="e.g. add a 24h cooldown on treasury withdraw, expose totalStaked in the UI schema…"
+            placeholder="e.g. add a 24h cooldown on unstake, or increase the jackpot share…"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
@@ -94,13 +128,12 @@ export default function CodegenChatPanel({ messages, running, statusMsg, contrac
               }
             }}
             disabled={running}
-            className="min-h-[72px] resize-none text-sm"
+            className="min-h-[60px] resize-none text-sm"
           />
-          <Button variant="accent" onClick={submit} disabled={running || input.trim().length < 2} className="shrink-0 self-end">
-            {running ? <Loader2 className="animate-spin" /> : <Send className="size-4" />}
+          <Button variant="accent" size="icon" onClick={submit} disabled={running || input.trim().length < 2}>
+            <Send className="size-4" />
           </Button>
         </div>
-        <p className="mt-2 text-[0.65rem] text-muted-foreground">Enter to send · Shift+Enter for newline</p>
       </div>
     </div>
   );

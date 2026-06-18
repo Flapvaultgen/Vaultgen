@@ -52,8 +52,21 @@ export type RefineSession = {
 import { apiUrl, initApiBase } from "./api-base";
 
 export type CodegenEvent =
-  | { type: "status"; phase: "writing" | "fixing" | "fixing_spec" | "compiling" | "compile_failed" | "auditing" | "generating_tests" | "done" | "error"; attempt: number; message?: string }
-  | { type: "code_reset"; attempt: number }
+  | {
+      type: "status";
+      phase: "writing" | "fixing" | "fixing_spec" | "compiling" | "compile_failed" | "auditing" | "generating_tests" | "done" | "error";
+      attempt: number;
+      maxAttempts?: number;
+      message?: string;
+    }
+  | {
+      type: "code_reset";
+      attempt: number;
+      reason: "initial" | "retry";
+      retryKind?: FixLogEntry["phase"];
+      message?: string;
+    }
+  | { type: "fix_log"; entry: FixLogEntry }
   | { type: "code_delta"; delta: string }
   | { type: "name"; contractName: string }
   | { type: "explanation"; text: string }
