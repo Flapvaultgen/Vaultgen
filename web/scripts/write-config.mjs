@@ -15,7 +15,9 @@ try {
   /* fresh */
 }
 
-const apiUrl = (process.env.VITE_API_URL ?? "").replace(/\/$/, "");
+const raw = (process.env.VITE_API_URL ?? "").trim().replace(/\/$/, "");
+const apiUrl =
+  !raw ? "" : /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
 
 writeFileSync(
   publicConfig,

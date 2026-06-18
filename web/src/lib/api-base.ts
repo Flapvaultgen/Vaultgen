@@ -1,5 +1,12 @@
 /** Backend base URL. Dev: Vite proxies /api. Prod: VITE_API_URL or /config.json apiUrl. */
-let apiBase = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ?? "";
+function normalizeApiBase(raw: string): string {
+  const trimmed = raw.trim().replace(/\/$/, "");
+  if (!trimmed) return "";
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  return `https://${trimmed}`;
+}
+
+let apiBase = normalizeApiBase((import.meta.env.VITE_API_URL as string | undefined) ?? "");
 
 export function getApiBase(): string {
   return apiBase;
@@ -12,7 +19,7 @@ export async function initApiBase(): Promise<string> {
     const res = await fetch("/config.json", { cache: "no-store" });
     if (res.ok) {
       const cfg = (await res.json()) as { apiUrl?: string };
-      apiBase = (cfg.apiUrl ?? "").replace(/\/$/, "");
+      apiBase = normalizeApiBase(cfg.apiUrl ?? "");
     }
   } catch {
     /* offline */
