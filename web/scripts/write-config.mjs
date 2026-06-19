@@ -15,9 +15,15 @@ try {
   /* fresh */
 }
 
+// On Vercel, /api is proxied to Railway (see root vercel.json) — same-origin avoids CORS on every deploy URL.
 const raw = (process.env.VITE_API_URL ?? "").trim().replace(/\/$/, "");
-const apiUrl =
-  !raw ? "" : /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+const apiUrl = process.env.VERCEL
+  ? ""
+  : !raw
+    ? ""
+    : /^https?:\/\//i.test(raw)
+      ? raw
+      : `https://${raw}`;
 
 writeFileSync(
   publicConfig,

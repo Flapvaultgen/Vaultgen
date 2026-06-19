@@ -13,12 +13,22 @@ const port = Number(process.env.PORT ?? 3002);
 const corsOrigins = process.env.CORS_ORIGIN?.split(",")
   .map((s) => s.trim().replace(/\/$/, ""))
   .filter(Boolean);
+
+function corsOriginAllowed(origin: string | undefined): boolean {
+  if (!origin) return true;
+  if (!corsOrigins?.length) return true;
+  if (corsOrigins.includes(origin)) return true;
+  // Vercel production + preview URLs (avoids "offline" when alias or preview domain changes).
+  return /^https:\/\/flapvaultgen(-[a-z0-9-]+)?\.vercel\.app$/i.test(origin);
+}
+
 app.use(
-  cors(
-    corsOrigins?.length
-      ? { origin: corsOrigins, credentials: true }
-      : { origin: true }
-  )
+  cors({
+    origin(origin, callback) {
+      callback(null, corsOriginAllowed(origin));
+    },
+    credentials: true,
+  })
 );
 app.use(express.json({ limit: "2mb" }));
 

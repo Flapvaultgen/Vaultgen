@@ -20,7 +20,7 @@ export default function App() {
           return r.json();
         })
         .then((h) => setAiMode(h.aiMode === "openai" ? "OpenAI" : "no API key"))
-        .catch(() => setAiMode(base ? "offline" : "no API URL"))
+        .catch(() => setAiMode(base ? "offline (API unreachable)" : "no API URL"))
     );
   }, []);
 
