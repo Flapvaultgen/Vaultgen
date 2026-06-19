@@ -1,9 +1,12 @@
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, access } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
+const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(process.cwd(), "..");
-const SKILL_DIR = path.join(REPO_ROOT, ".agents/skills/flap-vault-spec-checker");
+const BUNDLED_SPEC_DIR = path.join(SERVER_DIR, "flap-spec-checker");
+const AGENTS_SPEC_DIR = path.join(REPO_ROOT, ".agents/skills/flap-vault-spec-checker");
 
 export type SpecCheckStatus = "pass" | "warn" | "fail" | "na";
 
@@ -49,9 +52,32 @@ const responseSchema = z.object({
 
 let rulesCache: string | null = null;
 
+async function dirExists(dir: string): Promise<boolean> {
+  try {
+    await access(dir);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveSpecPaths(): Promise<{ rulesDir: string; skillPath: string }> {
+  const agentsRules = path.join(AGENTS_SPEC_DIR, "references/rules");
+  if (await dirExists(agentsRules)) {
+    return {
+      rulesDir: agentsRules,
+      skillPath: path.join(AGENTS_SPEC_DIR, "SKILL.md"),
+    };
+  }
+  return {
+    rulesDir: path.join(BUNDLED_SPEC_DIR, "rules"),
+    skillPath: path.join(BUNDLED_SPEC_DIR, "SKILL.md"),
+  };
+}
+
 async function loadRuleCorpus(): Promise<string> {
   if (rulesCache) return rulesCache;
-  const rulesDir = path.join(SKILL_DIR, "references/rules");
+  const { rulesDir } = await resolveSpecPaths();
   const files = (await readdir(rulesDir)).filter((f) => f.endsWith(".md")).sort();
   const parts: string[] = [];
   for (const f of files) {
@@ -226,7 +252,8 @@ export async function runSpecAudit(
   }
 
   const rules = await loadRuleCorpus();
-  const skill = await readFile(path.join(SKILL_DIR, "SKILL.md"), "utf8");
+  const { skillPath } = await resolveSpecPaths();
+  const skill = await readFile(skillPath, "utf8");
   let factorySource = "";
   try {
     factorySource = await readFile(path.join(REPO_ROOT, "src/CodegenVaultFactory.sol"), "utf8");
