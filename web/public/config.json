@@ -1,6 +1,6 @@
 {
   "factoryAddress": "",
-  "productName": "FlapVaultGen",
+  "productName": "Flap Vault Gen",
   "flapLaunch": "https://flap.sh/launch",
-  "apiUrl": "https://example.up.railway.app"
+  "apiUrl": ""
 }

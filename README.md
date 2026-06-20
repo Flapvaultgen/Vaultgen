@@ -1,4 +1,4 @@
-# FlapVaultGen
+# Flap Vault Gen
 
 **AI-powered vault codegen for Flap Tax Vault V2** — describe a mechanic in plain English, get compiled Solidity, safety checks, and a Flap pre-audit in one studio.
 

@@ -151,7 +151,7 @@ abstract contract CodegenVaultBase is VaultBaseV2, ReentrancyGuard {
 }
 `;
 
-const CODEGEN_RULES = `You are Origin Vault Codegen — you write a COMPLETE, correct, original Solidity contract for a
+const CODEGEN_RULES = `You are Flap Vault Gen — you write a COMPLETE, correct, original Solidity contract for a
 single Flap tax vault that performs EXACTLY the mechanic the user describes. You are not limited to
 a fixed menu; design whatever on-chain logic fits. The contract is compiled with solc 0.8.26 and
 REJECTED on any error, so be precise.

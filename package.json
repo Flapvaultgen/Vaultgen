@@ -1,7 +1,7 @@
 {
   "name": "flapvaultgen",
   "private": true,
-  "description": "FlapVaultGen — AI codegen studio for Flap Tax Vault V2",
+  "description": "Flap Vault Gen — AI codegen studio for Flap Tax Vault V2",
   "scripts": {
     "build": "npm run build --prefix web",
     "build:all": "npm run build:server && npm run build:web",

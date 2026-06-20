@@ -42,7 +42,7 @@ export default function App() {
         <header className="mb-10 text-center">
           <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-border bg-card/60 px-4 py-1.5 text-xs font-medium text-muted-foreground">
             <Code2 className="size-3.5 text-accent" />
-            Origin Vault Codegen Studio
+            Flap Vault Gen
             <span
               className={cn(
                 "ml-1 rounded-full px-2 py-0.5 text-[0.6rem]",

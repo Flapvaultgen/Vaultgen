@@ -34,7 +34,7 @@ app.use(express.json({ limit: "2mb" }));
 
 app.get("/", (_req, res) => {
   res.json({
-    service: "FlapVaultGen API",
+    service: "Flap Vault Gen API",
     health: "/api/health",
     ok: true,
   });
@@ -158,6 +158,6 @@ app.post("/api/spec-audit", async (req, res) => {
 });
 
 app.listen(port, "0.0.0.0", () => {
-  console.log(`Origin Vault AI server http://localhost:${port}`);
+  console.log(`Flap Vault Gen API http://localhost:${port}`);
   console.log(`Mode: ${process.env.OPENAI_API_KEY ? "OpenAI" : "stub (set OPENAI_API_KEY)"}`);
 });

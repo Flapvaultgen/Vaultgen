@@ -1,4 +1,4 @@
-# Origin Vault Studio — User Guide
+# Flap Vault Gen — User Guide
 
 Describe your token vault in plain English. The studio writes **real Flap-compliant Solidity**, checks it automatically, and shows you when it is ready to try on testnet.
 
