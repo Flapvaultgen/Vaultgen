@@ -114,6 +114,35 @@ const cases: Case[] = [
     expectRules: ["no-block-randomness"],
   },
   {
+    name: "bad-survivor-delete-snapshot-before-rebuild",
+    prompt: "survivor elimination until one winner",
+    code: `${BASE}
+    mapping(address => bool) public hasEntered;
+    address[] public entrants;
+    address[] public drawSnapshot;
+    uint256 public survivorPool;
+    uint256 public pendingRequestId;
+    function requestElimination() external onlyManager {
+        require(entrants.length > 1, unicode"x / x");
+        delete drawSnapshot;
+        for (uint256 i = 0; i < entrants.length; i++) drawSnapshot.push(entrants[i]);
+    }
+    function _fulfillReasoning(uint256 requestId, uint8 choice) internal override {
+        address eliminated = drawSnapshot[choice];
+        hasEntered[eliminated] = false;
+        if (drawSnapshot.length == 1) { _sendNative(drawSnapshot[0], survivorPool); }
+        delete drawSnapshot;
+        entrants = new address[](0);
+        for (uint256 i = 0; i < drawSnapshot.length; i++) {
+            if (hasEntered[drawSnapshot[i]]) entrants.push(drawSnapshot[i]);
+        }
+    }
+    function description() public view override returns (string memory) { return unicode"a / 啊"; }
+    function vaultUISchema() public pure override returns (VaultUISchema memory s) { s.vaultType = "T"; s.description = "d"; s.methods = new VaultMethodSchema[](0); }
+}`,
+    expectRules: ["survivor-stale-snapshot-win", "survivor-rebuild-after-delete", "vault-logic"],
+  },
+  {
     name: "good-rewardpool-pattern",
     prompt: "stake dividend",
     code: `${BASE}

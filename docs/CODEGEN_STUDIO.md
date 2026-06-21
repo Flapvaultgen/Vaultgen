@@ -1,5 +1,52 @@
 # Flap Vault Gen — User Guide
 
+**Flap Vault Gen is v0 for tax vaults.**
+
+Right now, launching a custom vault on Flap requires a lot of coding skills. You need Solidity help. You need to understand the 9 spec rules. You need to avoid dumb EVM footguns like `receive()` gas limits and block randomness. And even after all that, there’s a decent chance an audit catches something obvious on day one.
+
+**Flap Vault Gen fixes the front half.**
+
+Describe the mechanic in plain English. It turns that into Solidity using Flap’s base contracts, compiles it with Foundry, catches compile and safety issues, runs the 9-rule Flap pre-audit, then lets you keep refining in chat.
+
+This isn’t “AI wrote a contract.” It’s **AI, Foundry, Flap rule scanners, and the spec corpus running in one loop.**
+
+The output deploys through **`CodegenVaultFactory`**. Testnet first. Mainnet still needs a real audit.
+
+---
+
+## What runs when you click Generate
+
+The studio is not a one-shot chat completion. Each pass runs this pipeline:
+
+1. **Draft** — AI writes a full vault contract (inherits `CodegenVaultBase`, uses Flap V2 tax/oracle helpers).
+2. **Compile** — **Foundry** runs `forge build` with **solc 0.8.26** against real Flap interfaces. Failures go back to AI with compiler output.
+3. **Safety scan** — Static blockers: cheap `receive()`, no block randomness for winners, named buckets (not `address(this).balance`), no `selfdestruct` / `delegatecall`, required `description()` + `vaultUISchema()`, and more.
+4. **Logic scan** — Mechanic-specific checks for lotteries, survivor games, staking accrual, oracle callbacks, etc.
+5. **Fix loop** — If compile, safety, or spec checks fail, AI rewrites with a targeted fix prompt (you see pass count and reason in the progress panel).
+6. **Integration test** — AI writes a **mainnet-fork Foundry test** scaffold (Flap Rule **006**).
+7. **Flap pre-audit** — Verifier reads the **9 official spec rules** (001–009) and returns pass / warn / fail per rule.
+8. **Chat refine** — Follow-up messages run the same loop on your existing vault.
+
+When the panel shows **Deploy ready**, you have compiled bytecode that cleared automated checks — good for **testnet**. Mainnet still needs human review and a third-party audit.
+
+---
+
+## The 9 Flap spec rules (pre-audit)
+
+| Rule | What it checks |
+|------|----------------|
+| **001** Vault rules | Tax buckets, fund flow, manager vs holder actions |
+| **002** Factory rules | `CodegenVaultFactory` / deployment compatibility |
+| **003** Fairness | Gameable mechanics, pro-rata vs balance snapshots |
+| **004** UI-friendly | Bilingual `require` messages for Flap.sh UI |
+| **005** Receive gas limit | No swaps, loops, or payouts inside `receive()` |
+| **006** Integration tests | Mainnet-fork Foundry coverage exists |
+| **007** AI oracle | Random outcomes via Flap AI Provider, not block entropy |
+| **008** Trigger service | Scheduled / keeper actions where needed |
+| **009** Emergency controls | Override + emergency withdraw patterns |
+
+---
+
 Describe your token vault in plain English. The studio writes **real Flap-compliant Solidity**, checks it automatically, and shows you when it is ready to try on testnet.
 
 You do not pick from a fixed template list — each vault is generated for your idea.

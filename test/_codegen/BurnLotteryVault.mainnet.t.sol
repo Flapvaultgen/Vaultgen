@@ -69,7 +69,7 @@ contract BurnLotteryVaultMainnetTest is FlapBSCFixture {
     }
 
     function test_BurnLotteryVault_writeMethodsDocumented() public view {
-        // Documents executeBuyback, enter, requestDraw, lastRequestId, setAiModel for BurnLotteryVault audit trail (Rule 006).
+        // Documents enter, executeBuyback, requestDraw, lastRequestId, setAiModel for BurnLotteryVault audit trail (Rule 006).
         assertTrue(vault != address(0));
     }
 }

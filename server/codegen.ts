@@ -416,17 +416,46 @@ R4. Randomness policy — block entropy is FORBIDDEN for outcomes:
    - Prefer claimablePrize + claim() pull payment for winners.
 
 R5. Survivor / elimination (FlapAIConsumerBase — same snapshot rules as R1 lottery):
-   - Snapshot active stakers into drawSnapshot[] at requestElimination() BEFORE the AI request:
+   - requestElimination() MUST require(entrants.length > 1) — so drawSnapshot.length is ALWAYS >= 2 at fulfill time.
+     NEVER detect the final winner with if (drawSnapshot.length == 1) — that branch never runs.
+   - Snapshot entrants into drawSnapshot[] at requestElimination() BEFORE the AI request:
        delete drawSnapshot;
-       for (uint256 i = 0; i < stakers.length; i++) {
-           if (isActiveStaker[stakers[i]]) drawSnapshot.push(stakers[i]);
+       for (uint256 i = 0; i < entrants.length; i++) drawSnapshot.push(entrants[i]);
+     NEVER loop i < drawSnapshot.length immediately after delete — the array is empty until repopulated.
+   - _fulfillReasoning elimination flow (ORDER MATTERS — do not delete drawSnapshot before rebuilding entrants):
+       function _fulfillReasoning(uint256 requestId, uint8 choice) internal override {
+           require(requestId == pendingRequestId, unicode"Stale request / 过期请求");
+           pendingRequestId = 0;
+           lastDrawFee = 0;
+           require(drawSnapshot.length > 1 && choice < drawSnapshot.length, unicode"Bad choice / 错误选择");
+           address eliminated = drawSnapshot[choice];
+           hasEntered[eliminated] = false;
+           emit Eliminated(eliminated);
+           delete entrants;
+           uint256 survivors;
+           address winner;
+           for (uint256 i = 0; i < drawSnapshot.length; i++) {
+               address player = drawSnapshot[i];
+               if (hasEntered[player]) {
+                   entrants.push(player);
+                   survivors++;
+                   winner = player;
+               }
+           }
+           delete drawSnapshot;
+           if (survivors == 1) {
+               uint256 prize = survivorPool;
+               survivorPool = 0;
+               hasEntered[winner] = false;
+               delete entrants;
+               _sendNative(winner, prize);
+               emit WinnerPaid(winner, prize);
+           }
+           lastEliminationTime = block.timestamp;
        }
-     NEVER loop i < drawSnapshot.length immediately after delete — the array is empty.
-   - _fulfillReasoning uses drawSnapshot[choice] only — never live stakers[] after the request.
-   - Remove ONLY the eliminated address from active tracking; NEVER delete stakers[] entirely mid-game.
-   - Winner when one active staker remains; pay survivorPool then zero the bucket.
-   - Count active stakers in _fulfillReasoning — never if (drawSnapshot.length == 1) on a frozen snapshot.
-   - Cap active stakers <= 255; restore survivorPool += fee on _onFlapAIRequestRefunded.
+   - Remove ONLY the eliminated player each round — never delete entrants then loop an already-deleted drawSnapshot.
+   - Cap entrants: MAX_ENTRANTS = 255; restore survivorPool += lastDrawFee on _onFlapAIRequestRefunded.
+   - In description(), say "external AI provider selection" for eliminations — not "secure random".
 
 EXACT STRUCT SHAPES — build the schema with FIELD ASSIGNMENT only. Do NOT use struct constructors
 like VaultMethodSchema({...}) (it has 8 fields and will fail). vaultType and description are STRINGS.
@@ -608,6 +637,22 @@ function findFunctionBody(source: string, fnName: string): string | null {
   return extractFunctionChunks(source).find((f) => f.name === fnName)?.body ?? null;
 }
 
+/** True when code deletes drawSnapshot then loops drawSnapshot.length (array is empty — loop never runs). */
+function loopsSnapshotLengthAfterDelete(body: string, snapshotVar = "drawSnapshot"): boolean {
+  const idx = body.indexOf(`delete ${snapshotVar}`);
+  if (idx < 0) return false;
+  const after = body.slice(idx + `delete ${snapshotVar}`.length);
+  return new RegExp(`for\\s*\\([^)]*${snapshotVar}\\.length`, "i").test(after);
+}
+
+function isSurvivorMechanic(source: string, userPrompt = ""): boolean {
+  return (
+    /survivor|eliminat/i.test(userPrompt) ||
+    /requestElimination|SurvivorVault|EliminationVault/i.test(source) ||
+    (/requestElimination/.test(source) && /_fulfillReasoning/.test(source) && /drawSnapshot/.test(source))
+  );
+}
+
 function replaceFunctionBody(source: string, fnName: string, newBody: string): string {
   const re = new RegExp(`function\\s+${fnName}\\s*\\([^)]*\\)[^{]*\\{`, "g");
   const m = re.exec(source);
@@ -767,6 +812,35 @@ export function scanVaultLogic(source: string, userPrompt = ""): string[] {
       if (!/balanceOf\s*\(\s*msg\.sender\s*\)/.test(enter)) {
         issues.push("Holder lottery enter() missing taxToken balance check");
       }
+    }
+  }
+
+  if (isSurvivorMechanic(source, userPrompt)) {
+    const fulfillBody = findFunctionBody(source, "_fulfillReasoning") ?? "";
+    const elimBody = findFunctionBody(source, "requestElimination") ?? "";
+    if (fulfillBody && loopsSnapshotLengthAfterDelete(fulfillBody)) {
+      issues.push(
+        "Survivor _fulfillReasoning deletes drawSnapshot before looping drawSnapshot.length — rebuild entrants from the snapshot BEFORE delete drawSnapshot"
+      );
+    }
+    if (fulfillBody && /drawSnapshot\.length\s*==\s*1/.test(fulfillBody)) {
+      issues.push(
+        "Survivor winner check uses drawSnapshot.length == 1 but requestElimination requires entrants.length > 1 — count survivors after elimination instead"
+      );
+    }
+    if (
+      fulfillBody &&
+      /WinnerPaid|survivors\s*==\s*1/.test(fulfillBody) &&
+      !/hasEntered\[winner\]\s*=\s*false/.test(fulfillBody)
+    ) {
+      issues.push("Final survivor winner must reset hasEntered[winner] = false so they can play again");
+    }
+    if (elimBody && loopsSnapshotLengthAfterDelete(elimBody)) {
+      issues.push("requestElimination must repopulate drawSnapshot from entrants[] after delete — not loop empty drawSnapshot.length");
+    }
+    const emergBody = findFunctionBody(source, "emergencyWithdrawNative") ?? "";
+    if (emergBody && /excess|reserved|survivorPool/.test(emergBody) && !/emit\s+EmergencyWithdrawNative/.test(emergBody)) {
+      issues.push("emergencyWithdrawNative override must emit EmergencyWithdrawNative(to, amount)");
     }
   }
 
@@ -1105,16 +1179,45 @@ export function scanSafety(
   }
 
   const fulfillFn = extractFunctionChunks(source).find((f) => f.name === "_fulfillReasoning");
+  const survivor = isSurvivorMechanic(source, userPrompt);
+  if (fulfillFn && survivor) {
+    if (/drawSnapshot\.length\s*==\s*1/.test(fulfillFn.body)) {
+      add(
+        "block",
+        "survivor-stale-snapshot-win",
+        "Do not use drawSnapshot.length == 1 in _fulfillReasoning — requestElimination requires entrants.length > 1, so snapshot size is always >= 2. Count remaining survivors after marking eliminated inactive."
+      );
+    }
+    if (loopsSnapshotLengthAfterDelete(fulfillFn.body)) {
+      add(
+        "block",
+        "survivor-rebuild-after-delete",
+        "In _fulfillReasoning rebuild entrants by looping drawSnapshot BEFORE delete drawSnapshot — after delete, drawSnapshot.length is 0 and the game breaks."
+      );
+    }
+    if (
+      (/WinnerPaid/.test(fulfillFn.body) || /survivors\s*==\s*1/.test(fulfillFn.body)) &&
+      !/hasEntered\[winner\]\s*=\s*false/.test(fulfillFn.body)
+    ) {
+      add(
+        "block",
+        "survivor-winner-not-reset",
+        "When the final survivor wins, set hasEntered[winner] = false before delete entrants so the winner is not permanently locked out."
+      );
+    }
+  }
+
   if (
     fulfillFn &&
-    (/survivor|eliminat/i.test(source) || /survivor|eliminat/i.test(userPrompt)) &&
-    /drawSnapshot\.length\s*==\s*1/.test(fulfillFn.body) &&
-    has(/isActiveStaker|activeStaker/)
+    survivor &&
+    /delete\s+entrants/.test(fulfillFn.body) &&
+    /entrants\s*=\s*new\s+address\[\]\(0\)/.test(fulfillFn.body) &&
+    loopsSnapshotLengthAfterDelete(fulfillFn.body)
   ) {
     add(
       "block",
-      "survivor-stale-snapshot-win",
-      "Do not use drawSnapshot.length == 1 in _fulfillReasoning to detect the winner — count remaining active stakers after marking the eliminated address inactive."
+      "survivor-clears-entrants-empty-loop",
+      "Never delete drawSnapshot then loop drawSnapshot.length to rebuild entrants — the loop runs zero times and entrants stays empty forever."
     );
   }
 
@@ -2207,6 +2310,7 @@ Quality bar reminders:
 - Staking: pendingRewards when totalStaked==0; pendingReward(address) view; no hidden auto-pay in updateUserReward
 - Bucket vaults: excess-only emergencyWithdrawNative (never drain reserved buckets)
 - AI async: clear lastDrawFee after fulfill; delete drawSnapshot on refund; require(n <= 255) before uint8 cast
+- Survivor/elimination: rebuild entrants from drawSnapshot BEFORE delete drawSnapshot; never if (drawSnapshot.length == 1); count survivors after elimination; hasEntered[winner]=false on final payout
 - enter() nonReentrant; hasEntered reset when round ends
 - BuybackExecuted(uint256 bnbIn, uint256 tokensBought) — name event fields to match emit values
 ${uischemaHint}
@@ -2237,6 +2341,14 @@ MANDATORY for AI lottery (_fulfillReasoning must include this before the closing
 MANDATORY before uint8(n) in requestDraw:
         require(n > 0 && n <= type(uint8).max, unicode"Invalid entrant count / 无效参与者数量");
 
+MANDATORY for survivor _fulfillReasoning (order matters):
+        address eliminated = drawSnapshot[choice]; hasEntered[eliminated] = false;
+        delete entrants;
+        for (uint256 i = 0; i < drawSnapshot.length; i++) { if (hasEntered[drawSnapshot[i]]) entrants.push(...); }
+        delete drawSnapshot;  // ONLY after the loop above
+        if (survivors == 1) { hasEntered[winner] = false; pay prize; }
+        NEVER: delete drawSnapshot; for (i < drawSnapshot.length) — length is 0 after delete.
+
 Blocking issues:
 
 ${list}`;
@@ -2252,6 +2364,7 @@ Apply these exact fixes if relevant:
 1. Inside _fulfillReasoning, after paying the winner and clearing entrants/drawSnapshot, add: lastDrawFee = 0;
 2. Inside requestDraw, before uint8(n) or the AI request, add: require(n > 0 && n <= type(uint8).max, unicode"Invalid entrant count / 无效参与者数量");
 3. _onFlapAIRequestRefunded must: pendingRequestId = 0; jackpot += lastDrawFee; lastDrawFee = 0; delete drawSnapshot;
+4. Survivor _fulfillReasoning: loop drawSnapshot to rebuild entrants BEFORE delete drawSnapshot; use survivors == 1 not drawSnapshot.length == 1; hasEntered[winner] = false on final win.
 
 Blocking issues still present:
 

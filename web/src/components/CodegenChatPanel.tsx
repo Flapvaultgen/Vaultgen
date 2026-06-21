@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Loader2, MessageSquare, Plus, Send } from "lucide-react";
+import { Loader2, Plus, Send } from "lucide-react";
 import type { FixLogEntry } from "../lib/codegen";
 import { describePipelineHeadline, type CodeResetInfo, type PipelinePhase } from "../lib/pipeline-status";
 import PipelineProgress from "./PipelineProgress";
@@ -60,16 +60,13 @@ export default function CodegenChatPanel({
     : "Updating vault…";
 
   return (
-    <div className="flex h-full min-h-[520px] flex-col rounded-xl border border-border bg-card/40">
+    <div className="flex h-full min-h-[520px] flex-col rounded-lg border border-border bg-card">
       <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <MessageSquare className="size-4 shrink-0 text-accent" />
-          <div className="min-w-0">
-            <p className="text-sm font-medium">Refine in chat</p>
-            {contractName && (
-              <p className="truncate font-mono text-[0.65rem] text-muted-foreground">{contractName}.sol</p>
-            )}
-          </div>
+        <div className="min-w-0">
+          <p className="text-sm font-medium">Refine</p>
+          {contractName && (
+            <p className="truncate font-mono text-xs text-muted-foreground">{contractName}.sol</p>
+          )}
         </div>
         <Button variant="ghost" size="sm" onClick={onNewVault} className="shrink-0 gap-1.5 text-xs">
           <Plus className="size-3.5" />
@@ -84,8 +81,8 @@ export default function CodegenChatPanel({
             className={cn(
               "max-w-[95%] rounded-lg px-3 py-2 text-sm leading-relaxed",
               m.role === "user"
-                ? "ml-auto bg-accent/15 text-foreground"
-                : "mr-auto border border-border bg-secondary/30 text-foreground/90"
+                ? "ml-auto bg-secondary text-foreground"
+                : "mr-auto border border-border bg-background text-foreground/90"
             )}
           >
             {m.pending ? (
@@ -118,7 +115,7 @@ export default function CodegenChatPanel({
         <div className="flex gap-2">
           <Textarea
             rows={2}
-            placeholder="e.g. add a 24h cooldown on unstake, or increase the jackpot share…"
+            placeholder="e.g. add unstake cooldown, cap entrants at 255…"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
@@ -128,10 +125,16 @@ export default function CodegenChatPanel({
               }
             }}
             disabled={running}
-            className="min-h-[60px] resize-none text-sm"
+            className="min-h-[56px] resize-none text-sm"
           />
-          <Button variant="accent" size="icon" onClick={submit} disabled={running || input.trim().length < 2}>
-            <Send className="size-4" />
+          <Button
+            variant="default"
+            size="icon"
+            onClick={submit}
+            disabled={running || input.trim().length < 2}
+            className="shrink-0 self-end"
+          >
+            {running ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
           </Button>
         </div>
       </div>

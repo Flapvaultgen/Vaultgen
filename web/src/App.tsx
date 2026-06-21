@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { BookOpen, Code2 } from "lucide-react";
+import { BookOpen } from "lucide-react";
 import CodegenStudio from "./CodegenStudio";
 import DocsPage from "./DocsPage";
 import MetaMaskConnect from "./components/MetaMaskConnect";
@@ -20,7 +20,7 @@ export default function App() {
           return r.json();
         })
         .then((h) => setAiMode(h.aiMode === "openai" ? "OpenAI" : "no API key"))
-        .catch(() => setAiMode(base ? "offline (API unreachable)" : "no API URL"))
+        .catch(() => setAiMode(base ? "offline" : "no API URL"))
     );
   }, []);
 
@@ -28,53 +28,58 @@ export default function App() {
     return <DocsPage onBack={() => setView("studio")} />;
   }
 
+  const online = aiMode === "OpenAI";
+
   return (
     <div className="min-h-screen">
-      <div className={cn("container py-12", wideLayout ? "max-w-7xl" : "max-w-5xl")}>
-        <div className="mb-6 flex items-center justify-between gap-4">
-          <Button variant="ghost" size="sm" onClick={() => setView("docs")} className="gap-2 text-muted-foreground">
-            <BookOpen className="size-4" />
-            Docs
-          </Button>
-          <MetaMaskConnect />
-        </div>
-
-        <header className="mb-10 text-center">
-          <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-border bg-card/60 px-4 py-1.5 text-xs font-medium text-muted-foreground">
-            <Code2 className="size-3.5 text-accent" />
-            Flap Vault Gen
+      <div className={cn("container py-8 sm:py-10", wideLayout ? "max-w-7xl" : "max-w-2xl")}>
+        <header className="mb-8 flex items-center justify-between gap-4">
+          <div>
+            <p className="text-sm font-semibold tracking-tight text-foreground">Flap Vault Gen</p>
+            <p className="text-xs text-muted-foreground">Tax vault codegen for Flap V2</p>
+          </div>
+          <div className="flex items-center gap-2">
             <span
               className={cn(
-                "ml-1 rounded-full px-2 py-0.5 text-[0.6rem]",
-                aiMode === "OpenAI" ? "bg-success/15 text-success" : "bg-secondary text-muted-foreground"
+                "hidden rounded-md px-2 py-1 text-[0.65rem] font-medium sm:inline",
+                online ? "bg-success/10 text-success" : "bg-secondary text-muted-foreground"
               )}
             >
-              {aiMode}
+              {online ? "API online" : aiMode}
             </span>
+            <Button variant="ghost" size="sm" onClick={() => setView("docs")} className="gap-1.5 text-muted-foreground">
+              <BookOpen className="size-3.5" />
+              Docs
+            </Button>
+            <MetaMaskConnect />
           </div>
-          <h1 className="bg-gradient-to-br from-white to-white/60 bg-clip-text text-4xl font-bold tracking-tight text-transparent sm:text-5xl">
-            Describe any mechanic. AI writes the vault.
-          </h1>
-          <p className="mx-auto mt-4 max-w-2xl text-balance text-muted-foreground">
-            Not a fixed menu — describe whatever you want (staking, dividends, snapshots, lotteries) and the AI writes
-            real Solidity, compiles it with solc 0.8.26, auto-fixes errors, and runs Flap&apos;s 9-rule pre-audit.
-          </p>
         </header>
+
+        {!wideLayout && (
+          <div className="mb-8">
+            <h1 className="text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">
+              Describe your vault mechanic
+            </h1>
+            <p className="mt-2 max-w-xl text-sm leading-relaxed text-muted-foreground">
+              Plain English in → Flap-compliant Solidity out. Foundry compile, static safety scanners, 9-rule
+              pre-audit, then refine in chat. Deploy bytecode through{" "}
+              <code className="rounded bg-secondary px-1 py-0.5 font-mono text-[0.8em]">CodegenVaultFactory</code>.
+              Testnet first.
+            </p>
+          </div>
+        )}
 
         <CodegenStudio onChatActive={setWideLayout} />
 
-        <footer className="mt-12 space-y-2 border-t border-border pt-6 text-center text-xs text-muted-foreground">
-          <p>
-            <button type="button" onClick={() => setView("docs")} className="underline underline-offset-2 hover:text-foreground">
-              Read the docs
-            </button>{" "}
-            for the AI pipeline, API, prompts, and why this beats raw ChatGPT.
-          </p>
-          <p>
-            Generated code is UNAUDITED. Deploy via CodegenVaultFactory (CREATE2) — testnet first. Mainnet is gated until
-            audited.
-          </p>
-        </footer>
+        {!wideLayout && (
+          <footer className="mt-8 text-center text-xs text-muted-foreground">
+            <button type="button" onClick={() => setView("docs")} className="underline-offset-2 hover:underline">
+              Documentation
+            </button>
+            <span className="mx-2">·</span>
+            <span>Unaudited output — testnet first</span>
+          </footer>
+        )}
       </div>
     </div>
   );

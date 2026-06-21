@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Code2,
-  Sparkles,
   Loader2,
   Copy,
   Check,
@@ -184,7 +182,6 @@ export default function CodegenStudio({ onChatActive }: Props) {
     }
   };
 
-  // After first generation completes, teleport to chat.
   useEffect(() => {
     if (viewMode === "prompt" && result && !running && initialPrompt === "") {
       enterChat(prompt.trim(), result);
@@ -271,83 +268,84 @@ export default function CodegenStudio({ onChatActive }: Props) {
 
   const vaultPanel = result ? (
     <Card className="flex h-full min-h-[520px] flex-col">
-      <CardHeader className="pb-3">
-        <CardTitle className="flex flex-wrap items-center gap-2 text-base">
-          <span className="font-mono">{result.contractName}.sol</span>
-          <Badge variant={result.compiled ? "success" : "destructive"}>
-            {result.compiled ? "Compiles" : "Compile failed"}
-          </Badge>
-          {safety && <Badge variant={safety.badge}>safety: {safety.label}</Badge>}
-          {specLevel && specLevel !== "skipped" && (
-            <Badge variant={specLevel === "pass" ? "success" : specLevel === "warn" ? "warning" : "destructive"}>
-              spec: {specLevel}
+        <CardHeader className="pb-3">
+          <CardTitle className="flex flex-wrap items-center gap-2 text-base">
+            <span className="font-mono">{result.contractName}.sol</span>
+            <Badge variant={result.compiled ? "success" : "destructive"}>
+              {result.compiled ? "Compiles" : "Compile failed"}
             </Badge>
-          )}
-          {running && <Badge variant="warning">updating…</Badge>}
-        </CardTitle>
-        <CardDescription className="text-xs">{result.explanation}</CardDescription>
-      </CardHeader>
-      <CardContent className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden">
-        {pipelineProgress}
-
-        <div className="min-h-0 flex-1 overflow-hidden rounded-lg border border-border">
-          <div className="flex items-center justify-between border-b border-border bg-secondary/40 px-3 py-1.5">
-            <span className="text-xs text-muted-foreground">Solidity</span>
-            <button
-              type="button"
-              onClick={() => copy(result.source)}
-              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-            >
-              {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-              {copied ? "Copied" : "Copy"}
-            </button>
-          </div>
-          <pre
-            ref={codeRef}
-            className="max-h-[340px] overflow-auto bg-background/60 p-3 font-mono text-[0.68rem] leading-relaxed lg:max-h-[420px]"
-          >
-            <code>
-              {numberedSource.map((line, i) => (
-                <div key={i} className="grid grid-cols-[3ch_1fr] gap-2">
-                  <span className="select-none text-right text-muted-foreground/40">{i + 1}</span>
-                  <span className="whitespace-pre-wrap break-words text-foreground/90">{line}</span>
-                </div>
-              ))}
-              {running && liveCode && !result && (
-                <span className="ml-0.5 inline-block h-3 w-1 animate-pulse bg-accent" />
-              )}
-            </code>
-          </pre>
-        </div>
-
-        {result.specAudit && result.specAudit.level !== "skipped" && (
-          <div className="max-h-48 overflow-y-auto">
-            <SpecAuditPanel audit={result.specAudit} />
-          </div>
-        )}
-
-        <div className="rounded-lg border border-border bg-secondary/20 p-2.5 text-xs">
-          <div className="flex items-center gap-2">
-            {deployable ? (
-              <CircleCheck className="size-3.5 text-success" />
-            ) : (
-              <CircleX className="size-3.5 text-destructive" />
+            {safety && <Badge variant={safety.badge}>safety: {safety.label}</Badge>}
+            {specLevel && specLevel !== "skipped" && (
+              <Badge variant={specLevel === "pass" ? "success" : specLevel === "warn" ? "warning" : "destructive"}>
+                spec: {specLevel}
+              </Badge>
             )}
-            <span className="font-medium">{deployable ? "Ready for testnet" : "Not deployable yet"}</span>
+            {running && <Badge variant="warning">updating…</Badge>}
+          </CardTitle>
+          <CardDescription className="text-xs">{result.explanation}</CardDescription>
+        </CardHeader>
+        <CardContent className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden">
+          {pipelineProgress}
+
+          <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-border bg-background">
+            <div className="flex items-center justify-between border-b border-border bg-secondary/50 px-3 py-1.5">
+              <span className="text-xs text-muted-foreground">Solidity</span>
+              <button
+                type="button"
+                onClick={() => copy(result.source)}
+                className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+              >
+                {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                {copied ? "Copied" : "Copy"}
+              </button>
+            </div>
+            <pre
+              ref={codeRef}
+              className="max-h-[340px] overflow-auto p-3 font-mono text-[0.68rem] leading-relaxed lg:max-h-[420px]"
+            >
+              <code>
+                {numberedSource.map((line, i) => (
+                  <div key={i} className="grid grid-cols-[3ch_1fr] gap-2">
+                    <span className="select-none text-right text-muted-foreground/40">{i + 1}</span>
+                    <span className="whitespace-pre-wrap break-words text-foreground/90">{line}</span>
+                  </div>
+                ))}
+              </code>
+            </pre>
           </div>
-          {specFails.length > 0 && (
-            <p className="mt-1 text-muted-foreground">FAIL rules: {specFails.join(", ")}</p>
+
+          {result.specAudit && result.specAudit.level !== "skipped" && (
+            <div className="max-h-48 overflow-y-auto">
+              <SpecAuditPanel audit={result.specAudit} />
+            </div>
           )}
-        </div>
-      </CardContent>
-    </Card>
+
+          <div className="rounded-md border border-border bg-secondary/30 p-2.5 text-xs">
+            <div className="flex items-center gap-2">
+              {deployable ? (
+                <CircleCheck className="size-3.5 text-success" />
+              ) : (
+                <CircleX className="size-3.5 text-destructive" />
+              )}
+              <span className="font-medium">{deployable ? "Ready for testnet" : "Not deployable yet"}</span>
+            </div>
+            {specFails.length > 0 && (
+              <p className="mt-1 text-muted-foreground">FAIL rules: {specFails.join(", ")}</p>
+            )}
+          </div>
+        </CardContent>
+      </Card>
   ) : null;
 
   if (viewMode === "chat") {
     return (
       <div className="space-y-4">
-        {error && <p className="text-sm text-destructive">{error}</p>}
-        <div className="grid min-h-[calc(100vh-14rem)] gap-4 lg:grid-cols-[minmax(300px,380px)_1fr]">
+        {error && (
+          <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            {error}
+          </p>
+        )}
+        <div className="grid min-h-[calc(100vh-10rem)] gap-4 lg:grid-cols-[minmax(300px,380px)_1fr]">
           <CodegenChatPanel
             messages={chatMessages}
             running={running}
@@ -363,7 +361,7 @@ export default function CodegenStudio({ onChatActive }: Props) {
           />
           {vaultPanel ?? (
             <Card className="flex min-h-[520px] items-center justify-center">
-              <Loader2 className="size-8 animate-spin text-accent" />
+              <Loader2 className="size-8 animate-spin text-primary" />
             </Card>
           )}
         </div>
@@ -372,23 +370,21 @@ export default function CodegenStudio({ onChatActive }: Props) {
   }
 
   return (
-    <div className="space-y-6">
-      <Card className="border-accent/30">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Code2 className="size-5 text-accent" />
-            Describe the mechanic
-          </CardTitle>
-          <CardDescription>
-            Describe your vault once — then refine it in chat (compile, safety scan, and pre-audit run on every change).
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
+    <div className="space-y-4">
+      <Card>
+        <CardContent className="space-y-4 p-4">
           <Textarea
-            rows={4}
-            placeholder="e.g. holders stake their tokens and earn a pro-rata share of all tax BNB; add stake, unstake and claim…"
+            rows={5}
+            placeholder="e.g. holders stake tokens and earn pro-rata tax BNB; weekly AI draw picks a winner from snapshotted entrants…"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
+            className="min-h-[140px] resize-none text-sm"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                void onGenerate();
+              }
+            }}
           />
           <div className="flex flex-wrap gap-2">
             {EXAMPLES.map((ex) => (
@@ -396,17 +392,18 @@ export default function CodegenStudio({ onChatActive }: Props) {
                 key={ex}
                 type="button"
                 onClick={() => setPrompt(ex)}
-                className="rounded-full border border-border bg-secondary/40 px-3 py-1 text-xs text-muted-foreground transition-colors hover:border-accent/50 hover:text-foreground"
+                className="rounded-md border border-border bg-secondary/50 px-2.5 py-1 text-left text-[0.65rem] text-muted-foreground hover:border-border hover:bg-secondary hover:text-foreground"
               >
-                {ex}
+                {ex.length > 48 ? `${ex.slice(0, 48)}…` : ex}
               </button>
             ))}
           </div>
-          <div className="flex items-center gap-3">
-            <Button variant="accent" onClick={onGenerate} disabled={running || prompt.trim().length < 8}>
-              {running ? <Loader2 className="animate-spin" /> : <Sparkles />}
+          <div className="flex flex-wrap items-center gap-3 border-t border-border pt-4">
+            <Button variant="default" onClick={onGenerate} disabled={running || prompt.trim().length < 8}>
+              {running ? <Loader2 className="animate-spin" /> : null}
               {running ? "Generating…" : "Generate Solidity"}
             </Button>
+            <span className="text-xs text-muted-foreground">⌘↵</span>
             {error && <p className="text-sm text-destructive">{error}</p>}
           </div>
         </CardContent>
@@ -415,14 +412,20 @@ export default function CodegenStudio({ onChatActive }: Props) {
       {(running || liveCode) && !result && (
         <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="text-base">
-              {liveName ? <span className="font-mono">{liveName}.sol</span> : "Building your vault"}
+            <CardTitle className="text-base font-mono">
+              {liveName ? `${liveName}.sol` : "Output"}
             </CardTitle>
             {running && pipelineProgress && <div className="pt-1">{pipelineProgress}</div>}
           </CardHeader>
           <CardContent>
-            <pre ref={codeRef} className="max-h-[420px] overflow-auto font-mono text-[0.72rem]">
-              <code className="whitespace-pre-wrap">{liveCode || "Waiting for Solidity stream…"}</code>
+            <pre
+              ref={codeRef}
+              className="max-h-[420px] overflow-auto rounded-md border border-border bg-background p-4 font-mono text-[0.72rem]"
+            >
+              <code className="whitespace-pre-wrap text-foreground/90">
+                {liveCode || "Waiting for stream…"}
+                {running && liveCode && <span className="ml-0.5 inline-block h-3.5 w-0.5 animate-pulse bg-primary" />}
+              </code>
             </pre>
           </CardContent>
         </Card>
