@@ -151,10 +151,35 @@ abstract contract CodegenVaultBase is VaultBaseV2, ReentrancyGuard {
 }
 `;
 
+const FLAP_V2_ARCHITECTURE = `FLAP V2 ARCHITECTURE (follow exactly):
+- NEVER modify, rename, move, or regenerate src/flap/ — canonical interfaces only.
+- Generated vault source is compiled from src/_codegen/ beside src/flap/ (studio path).
+- STUDIO DEPLOY PATH (default): non-upgradeable constructor vault inheriting CodegenVaultBase,
+  deployed via CodegenVaultFactory CREATE2 + creation bytecode (testnet / rapid iteration).
+- PRODUCTION PATH (when user asks for "production", "upgradeable", "beacon", or "mainnet-ready"):
+  generate UpgradeableBeacon factory + Initializable vault implementation per FreeCoinBeacon.sol:
+  constructor() { _disableInitializers(); }, initialize(...) replaces constructor logic,
+  ReentrancyGuardUpgradeable, BeaconProxy via factory with abi.encodeCall(Vault.initialize, (...)).
+  Upgrade/admin authority MUST be Guardian-only. Omit emergencyWithdrawNative/Token on upgradeable vaults
+  (Rule 009 proxy exception — emergency = Guardian upgrade path).
+
+RULE 009 — EMERGENCY CONTROLS (non-upgradeable studio vaults):
+- CodegenVaultBase ALREADY provides Guardian-only, nonReentrant, full-balance emergencyWithdrawNative(to)
+  and full-token-balance emergencyWithdrawToken(token, to) with events. DO NOT override these unless the
+  user explicitly opts out of Rule 009 compatibility.
+- NEVER make creator/manager able to call emergency functions. NEVER add amount params or hardcode recipient.
+- DO NOT generate "excess-only" emergency withdrawals for Flap spec compliance — that diverges from Rule 009.
+- Staking vaults: inherited Guardian CAN drain all staked taxToken and reward BNB by design. Disclose this
+  trust model in description() and vaultUISchema.description (e.g. "Guardian emergency recovery per Flap Rule 009").
+  For production staking, recommend upgradeable beacon pattern (no emergency drain functions).
+`;
+
 const CODEGEN_RULES = `You are Flap Vault Gen — you write a COMPLETE, correct, original Solidity contract for a
 single Flap tax vault that performs EXACTLY the mechanic the user describes. You are not limited to
 a fixed menu; design whatever on-chain logic fits. The contract is compiled with solc 0.8.26 and
 REJECTED on any error, so be precise.
+
+${FLAP_V2_ARCHITECTURE}
 
 WHAT IS ALREADY PROVIDED (do NOT write any of this — it is injected and in scope):
 - SPDX line, pragma, and all imports.
@@ -249,22 +274,25 @@ STAKING (accRewardPerShare) — reference pattern the scanner enforces:
 - receive(): if totalStaked == 0, pendingRewards += msg.value (single undistributed bucket).
   if totalStaked > 0, accRewardPerShare += msg.value * 1e18 / totalStaked.
   NEVER mix accRewardPerShare += in receive with rewardPool -= on payout — pick ONE model.
-- stake(): if pendingRewards > 0, roll BEFORE increasing totalStaked using denominator (totalStaked + amount)
-  so the FIRST staker also receives pre-stake tax: accRewardPerShare += pendingRewards * 1e18 / (totalStaked + amount); pendingRewards = 0;
+- stake(): require(amount > 0). If pendingRewards > 0, roll BEFORE increasing totalStaked using
+  denominator (totalStaked + received) so the FIRST staker also receives pre-stake tax.
 - claimReward(): compute pending, pay _sendNative, update rewardDebt — do NOT call an internal
-  harvest helper that also pays (no double-harvest).
-- Add pendingReward(address user) external view returns (uint256) so the UI can show accured rewards.
-- stake/unstake may sync rewardDebt after amount change but should NOT auto-pay unless you omit claimReward().
+  harvest helper that also pays (no double-harvest). Do NOT auto-pay inside stake() if claimReward exists.
+- Add pendingReward(address user) external view — MUST also appear in vaultUISchema.methods.
 - Pay rewards from contract BNB balance — never rewardPool -= pending unless ALL tax went into rewardPool only.
-- If taxToken may be fee-on-transfer, credit stake amount using balance-before/after delta, not requested amount.
-- Override emergencyWithdrawToken for taxToken when users stake: withdraw only excess above totalStaked tokens.
+- taxToken is a Flap tax token and MAY be fee-on-transfer — ALWAYS credit stake using balance delta:
+      uint256 beforeBal = IERC20(taxToken).balanceOf(address(this));
+      IERC20(taxToken).safeTransferFrom(msg.sender, address(this), amount);
+      uint256 received = IERC20(taxToken).balanceOf(address(this)) - beforeBal;
+      require(received > 0, unicode"No tokens received / 未收到代币");
+      user.amount += received; totalStaked += received;
+- Document in description() what happens to BNB when totalStaked == 0 (pendingRewards bucket).
+- DO NOT override emergencyWithdrawNative/Token — inherit Rule 009 Guardian full-drain from base;
+  disclose Guardian trust in description/schema for staking vaults.
 E. NEVER pay out address(this).balance. Pay each winner/claimant from the SPECIFIC bucket that
    funds it (e.g. send jackpot, then jackpot = 0). BNB in must equal BNB out across buckets.
-F. CodegenVaultBase provides emergencyWithdrawNative/Token (onlyGuardian). For bucket vaults
-   (buybackBudget, jackpot, treasury, etc.) you SHOULD override emergencyWithdrawNative to withdraw
-   ONLY excess BNB above reserved buckets (buybackBudget + jackpot + …), OR zero all bucket counters
-   if draining everything — otherwise guardian rescue desyncs accounting. Overrides MUST keep
-   onlyGuardian — never onlyManager.
+F. CodegenVaultBase provides Rule 009 emergency functions (onlyGuardian, full balance). Do NOT override
+   them for "excess-only" accounting unless the user explicitly opts out of Rule 009 compatibility.
 G. Fairness (Rule 003): no privileged role may sandwich or systematically out-compete users.
 
 PRODUCTION QUALITY BAR (match FreeCoin.sol / Flap reference vaults — incomplete output is REJECTED):
@@ -316,14 +344,6 @@ BUCKET ACCOUNTING — when using named buckets (buybackBudget, treasury, jackpot
 - NEVER pay AI oracle fees or jackpots from undifferentiated address(this).balance while bucket counters
   still show funds — deduct from the correct bucket (e.g. jackpot -= fee before p.reason{value: fee}).
 - NEVER use require(address(this).balance >= X) for bucket-funded actions without syncing buckets.
-- For bucket vaults, override emergencyWithdrawNative with excess-only withdrawal:
-      uint256 reserved = buybackBudget + jackpot + treasury; // all tracked native buckets
-      uint256 excess = address(this).balance;
-      require(excess > reserved, unicode"No excess / 无多余");
-      excess -= reserved;
-      _sendNative(to, excess);
-      emit EmergencyWithdrawNative(to, excess);
-  NEVER drain address(this).balance while reserved buckets still hold user funds.
 
 LOTTERY + AI (FlapAIConsumerBase) — MANDATORY patterns:
 - Snapshot: at requestDraw(), copy entrants to address[] drawSnapshot and use ONLY drawSnapshot in
@@ -349,22 +369,31 @@ R1. Random winner / AI-decided outcome via FlapAIProvider:
            require(n > 0 && n <= 255, "Bad entrant count");
            IFlapAIProvider p = IFlapAIProvider(_getFlapAIProvider());
            uint256 fee = p.getModel(aiModelId).price;
-           require(jackpot >= fee, "Need fee from jackpot"); jackpot -= fee;
+           require(jackpot > fee, unicode"Prize too small after fee / 扣费后奖池太小"); // NEVER jackpot >= fee — winner gets 0
+           // Optional: uint256 public constant MIN_PRIZE = 0.01 ether;
+           // require(jackpot > fee + MIN_PRIZE, unicode"Prize too small / 奖池太小");
+           jackpot -= fee;
            lastDrawFee = fee;
            pendingRequestId = p.reason{value: fee}(aiModelId,
                "Pick one integer uniformly at random in [0, n-1] to choose a lottery winner.", uint8(n));
+           emit DrawRequested(pendingRequestId, n, fee);
        }
+   - REQUIRED events for AI lotteries:
+       event DrawRequested(uint256 indexed requestId, uint256 entrantCount, uint256 fee);
+       event DrawRefunded(uint256 indexed requestId, uint256 fee);
+       event AiModelUpdated(uint256 indexed modelId);
+     setAiModel MUST emit AiModelUpdated(id). Refund MUST emit DrawRefunded(requestId, lastDrawFee).
    - In _fulfillReasoning use drawSnapshot[choice], NOT entrants[choice].
    - Reset hasEntered for every drawSnapshot address BEFORE delete entrants (loop drawSnapshot first).
    - Set lastDrawTime = block.timestamp after a successful draw payout.
    - Clear lastDrawFee = 0 after successful fulfillment.
    - Store draw fee in lastDrawFee at requestDraw; restore jackpot += lastDrawFee in _onFlapAIRequestRefunded.
-   - On refund: clear pendingRequestId, restore fee bucket, delete drawSnapshot, clear lastDrawFee — never leave
-     stale snapshot/fee state or permanently locked hasEntered.
+   - On refund: emit DrawRefunded; clear pendingRequestId; restore fee bucket; delete drawSnapshot; clear lastDrawFee.
    - Before uint8(n) cast: require(n > 0 && n <= 255, "...") or require(n <= type(uint8).max, "...").
    - requestDraw() MUST require(pendingRequestId == 0) — block overlapping async requests.
    - Implement the THREE required overrides (callback auth is handled by the base's
      onlyFlapAIProvider — do NOT write your own public fulfillReasoning):
+       mapping(address => uint256) public claimablePrize;
        function _fulfillReasoning(uint256 requestId, uint8 choice) internal override {
            require(requestId == pendingRequestId, "Stale request");
            pendingRequestId = 0;
@@ -374,13 +403,24 @@ R1. Random winner / AI-decided outcome via FlapAIProvider:
            for (uint256 i = 0; i < drawSnapshot.length; i++) hasEntered[drawSnapshot[i]] = false;
            delete drawSnapshot;
            delete entrants;
-           _sendNative(winner, prize);
+           claimablePrize[winner] += prize; // pull payment — never _sendNative(winner) here (contract winners brick the draw)
+           lastDrawTime = block.timestamp;
+           lastDrawFee = 0;
+           emit WinnerPaid(winner, prize);
+       }
+       function claimPrize() external nonReentrant {
+           uint256 amt = claimablePrize[msg.sender];
+           require(amt > 0, unicode"No prize / 无奖金");
+           claimablePrize[msg.sender] = 0;
+           _sendNative(msg.sender, amt);
        }
        function _onFlapAIRequestRefunded(uint256 requestId) internal override {
            if (requestId == pendingRequestId) {
+               emit DrawRefunded(requestId, lastDrawFee);
                pendingRequestId = 0;
                jackpot += lastDrawFee;
                lastDrawFee = 0;
+               delete drawSnapshot;
            }
        }
        function lastRequestId() public view override returns (uint256) { return pendingRequestId; }
@@ -409,10 +449,11 @@ R4. Randomness policy — block entropy is FORBIDDEN for outcomes:
    - Flap has no Chainlink VRF. Use FlapAIProvider via FlapAIConsumerBase (R1/R5) for outcomes.
    - If the user mentions prevrandao, VRF, or "random draw", still implement FlapAIConsumerBase.
    - NEVER emit drawWinner() / pickWinner() that uses block.prevrandao % n or blockhash.
-   - In description(), vaultUISchema(), and comments: say "external AI provider selection" for AI draws —
-     never "secure random" unless describing a VRF/proof-backed source.
+   - In description(), vaultUISchema(), and comments: say "AI-provider selected" or "external AI provider selection"
+     for AI draws — never "secure random" or bare "random winner/participant" without disclosing AI-provider trust.
+   - If enter() is open (no taxToken balance gate), description MUST say so — Sybil risk otherwise.
+   - If enter() requires holders, require(IERC20(taxToken).balanceOf(msg.sender) >= minimum).
    - Weekly/timed lotteries: requestDraw() enforces lastDrawTime + 1 weeks; _fulfillReasoning sets lastDrawTime = block.timestamp after payout.
-   - Bucket vaults: override emergencyWithdrawNative for excess-only withdrawal.
    - Prefer claimablePrize + claim() pull payment for winners.
 
 R5. Survivor / elimination (FlapAIConsumerBase — same snapshot rules as R1 lottery):
@@ -527,6 +568,23 @@ CONTRACT_NAME: <PascalCaseName>
 EXPLANATION: <1-2 sentences describing what you changed>
 SOLIDITY:
 contract <Name> is CodegenVaultBase { ... full updated contract ... }`;
+
+const UPGRADEABLE_MODE_APPENDIX = `
+PRODUCTION UPGRADEABLE MODE (user requested production/upgradeable/beacon/mainnet-ready):
+- Generate TWO contracts in one file if needed: upgradeable vault implementation + VaultFactoryBaseV2 factory.
+- Vault: Initializable, ReentrancyGuardUpgradeable, constructor() { _disableInitializers(); }, initialize(...) external initializer.
+- Factory: UpgradeableBeacon + BeaconProxy; newVault passes abi.encodeCall(Vault.initialize, (...)).
+- Guardian-only upgrade/admin authority on beacon. Omit emergencyWithdrawNative/Token on upgradeable vault (Rule 009 proxy exception).
+- Still implement receive(), description(), vaultUISchema(), vaultDataSchema() on factory.
+- Reference: src/FreeCoinBeacon.sol in this repo.`;
+
+function wantsUpgradeableMode(prompt: string): boolean {
+  return /\b(production|upgradeable|beacon|mainnet-ready|mainnet ready)\b/i.test(prompt);
+}
+
+function resolveSystemPrompt(base: string, userPrompt: string): string {
+  return wantsUpgradeableMode(userPrompt) ? `${base}${UPGRADEABLE_MODE_APPENDIX}` : base;
+}
 
 export type RefineChatTurn = { role: "user" | "assistant"; content: string };
 
@@ -780,8 +838,35 @@ export function scanVaultLogic(source: string, userPrompt = ""): string[] {
     if (/swapExactInput|_buyAndBurn|_sendNative/.test(recv)) {
       issues.push("Buyback/payout inside receive() — split into buckets only");
     }
-    if (/buybackBudget|treasury/.test(source) && !/function\s+emergencyWithdrawNative\s*\(/.test(source)) {
-      issues.push("Bucket vault missing emergencyWithdrawNative override");
+    if (/buybackBudget|treasury/.test(source)) {
+      /* Rule 009: inherit full-balance emergencyWithdrawNative from CodegenVaultBase — do not require excess-only override. */
+    }
+  }
+
+  if (isStake) {
+    const stakeFnBody = source.match(/function stake\s*\([^)]*\)[^{]*\{([\s\S]*?)^\s*\}/m)?.[1] ?? "";
+    if (/function stake/.test(source) && !/require\s*\(\s*amount\s*>\s*0/.test(stakeFnBody)) {
+      issues.push("stake() missing require(amount > 0)");
+    }
+    if (
+      /safeTransferFrom\s*\(/.test(stakeFnBody) &&
+      !/beforeBal|afterBal|received|balanceOf\s*\(\s*address\s*\(\s*this\s*\)\s*\)\s*-/.test(stakeFnBody)
+    ) {
+      issues.push("stake() credits requested amount — use balance-before/after delta for fee-on-transfer taxToken");
+    }
+    if (/function claimReward/.test(source) && /_sendNative\s*\(/.test(stakeFnBody)) {
+      issues.push("stake() auto-pays rewards while claimReward() exists — sync via claimReward only");
+    }
+    const schemaBody = extractVaultUISchemaBody(source) ?? "";
+    if (/function pendingReward\s*\(\s*address/.test(source) && schemaBody && !/\.name\s*=\s*"pendingReward"/.test(schemaBody)) {
+      issues.push("pendingReward(address) exists but is missing from vaultUISchema.methods");
+    }
+    const descTrust = [
+      source.match(/function description[\s\S]*?^\s*\}/m)?.[0] ?? "",
+      schemaBody,
+    ].join("\n");
+    if (!/Guardian|Rule 009|emergency recovery|应急/i.test(descTrust)) {
+      issues.push("Staking vault must disclose Guardian emergency recovery (Flap Rule 009) in description() or vaultUISchema.description");
     }
   }
 
@@ -811,6 +896,43 @@ export function scanVaultLogic(source: string, userPrompt = ""): string[] {
       const enter = source.match(/function enter[\s\S]*?^\s*\}/m)?.[0] ?? "";
       if (!/balanceOf\s*\(\s*msg\.sender\s*\)/.test(enter)) {
         issues.push("Holder lottery enter() missing taxToken balance check");
+      }
+    }
+    const descBody = source.match(/function description[\s\S]*?return unicode"([^"]+)"/)?.[1] ?? "";
+    if (
+      /FlapAIConsumerBase/.test(source) &&
+      /requestDraw/.test(source) &&
+      /jackpot\s*>=\s*fee/.test(source) &&
+      !/jackpot\s*>\s*fee|MIN_PRIZE|minimum prize/i.test(source)
+    ) {
+      issues.push("jackpot >= fee allows zero-prize winner — require jackpot > fee (or jackpot > fee + MIN_PRIZE)");
+    }
+    if (/FlapAIConsumerBase/.test(source) && /requestDraw/.test(source)) {
+      const fulfillBody = findFunctionBody(source, "_fulfillReasoning") ?? "";
+      if (fulfillBody && /_sendNative\s*\(\s*winner/.test(fulfillBody) && !/claimablePrize|claimPrize/.test(source)) {
+        issues.push(
+          "_fulfillReasoning push-pays winner via _sendNative — use claimablePrize[winner] += prize and claimPrize() pull payment"
+        );
+      }
+      if (!/event DrawRequested/.test(source)) {
+        issues.push("AI lottery missing DrawRequested event");
+      }
+      if (!/event DrawRefunded/.test(source)) {
+        issues.push("AI lottery missing DrawRefunded event");
+      }
+      if (/function setAiModel/.test(source) && !/event AiModelUpdated/.test(source)) {
+        issues.push("AI lottery missing AiModelUpdated event");
+      }
+      const refundBody = findFunctionBody(source, "_onFlapAIRequestRefunded") ?? "";
+      if (/event DrawRefunded/.test(source) && refundBody && !/emit DrawRefunded/.test(refundBody)) {
+        issues.push("_onFlapAIRequestRefunded must emit DrawRefunded(requestId, fee)");
+      }
+      const reqDrawBody = findFunctionBody(source, "requestDraw") ?? "";
+      if (/event DrawRequested/.test(source) && reqDrawBody && !/emit DrawRequested/.test(reqDrawBody)) {
+        issues.push("requestDraw() must emit DrawRequested after starting the AI request");
+      }
+      if (/random/i.test(descBody) && !/AI provider|AI-provider|Flap AI|oracle/i.test(descBody)) {
+        issues.push('description() must disclose AI-provider winner selection — not bare "random" wording');
       }
     }
   }
@@ -856,15 +978,7 @@ export function scanVaultLogic(source: string, userPrompt = ""): string[] {
     }
   }
 
-  // Bucket emergency drain check (logic layer).
-  if (/buybackBudget|jackpot|treasury|rewardPool|charityBudget/.test(source)) {
-    const emerg = source.match(/function emergencyWithdrawNative[\s\S]*?^\s*\}/m)?.[0] ?? "";
-    if (emerg && /address\s*\(\s*this\s*\)\.balance/.test(emerg)) {
-      if (!/balance\s*-|excess|reserved|buybackBudget\s*\+|jackpot\s*\+|treasury\s*\+/.test(emerg)) {
-        issues.push("emergencyWithdrawNative drains full balance while native buckets exist");
-      }
-    }
-  }
+  // Do not flag inherited Rule 009 full-balance emergency drain on bucket vaults.
 
   // AI async lifecycle.
   if (/FlapAIConsumerBase/.test(source) && /lastDrawFee|DrawFee/.test(source)) {
@@ -1233,11 +1347,26 @@ export function scanSafety(
     );
   }
 
-  if (hasBuckets && !/function\s+emergencyWithdrawNative\s*\(/.test(source)) {
+  if (hasBuckets && /function\s+emergencyWithdrawNative\s*\(/.test(source)) {
+    const emergOverride = extractFunctionChunks(source).find((f) => f.name === "emergencyWithdrawNative");
+    if (emergOverride && /excess|reserved|buybackBudget\s*\+|jackpot\s*\+|treasury\s*\+/.test(emergOverride.body)) {
+      add(
+        "block",
+        "excess-only-emergency-override",
+        "Do not override emergencyWithdrawNative with excess-only logic — inherit Rule 009 full-balance drain from CodegenVaultBase unless the user explicitly opts out."
+      );
+    }
+  }
+  const emergTokOverride = extractFunctionChunks(source).find((f) => f.name === "emergencyWithdrawToken");
+  if (
+    emergTokOverride &&
+    /totalStaked|excess|reserved/.test(emergTokOverride.body) &&
+    /taxToken|token\s*==/.test(emergTokOverride.body)
+  ) {
     add(
       "block",
-      "bucket-emergency-no-override",
-      "Bucket vault must override emergencyWithdrawNative to withdraw only excess BNB above reserved buckets (buybackBudget + jackpot + …), or zero buckets on full drain — base guardian drain desyncs accounting."
+      "excess-only-emergency-token",
+      "Do not override emergencyWithdrawToken with excess-only/totalStaked logic — inherit Rule 009 full-token drain from CodegenVaultBase unless the user explicitly opts out."
     );
   } else if (/function\s+emergencyWithdrawNative\s*\([^)]*\)[^{]*onlyManager/.test(source)) {
     add(
@@ -1315,6 +1444,21 @@ export function scanSafety(
       "block",
       "stake-rewards-lost-no-stakers",
       "receive() only accrues when totalStaked > 0 — tax BNB is lost when nobody is staked. Use rewardPool/treasury when totalStaked == 0 and roll it in on next stake."
+    );
+  }
+
+  // Staking: direct auto-pay inside stake() when claimReward exists.
+  const stakeFnDirect = extractFunctionChunks(source).find((f) => f.name === "stake");
+  if (
+    stakeFnDirect &&
+    has(/function\s+claim(?:Reward)?\s*\(/) &&
+    /_sendNative\s*\(/.test(stakeFnDirect.body) &&
+    !/updateUserReward|_updateReward|harvest/.test(stakeFnDirect.body)
+  ) {
+    add(
+      "block",
+      "stake-autopay-with-claim",
+      "Do not _sendNative inside stake() when claimReward() exists — users should claim via claimReward() only."
     );
   }
 
@@ -1539,19 +1683,28 @@ export function scanSafety(
     }
   }
 
-  // Bucket emergencyWithdrawNative must not drain reserved funds.
-  const emergFn = extractFunctionChunks(source).find((f) => f.name === "emergencyWithdrawNative");
-  if (emergFn && hasBuckets) {
-    const drainsAll =
-      /_sendNative\s*\(\s*\w+\s*,\s*(?:bal|balance|address\s*\(\s*this\s*\)\.balance)/.test(emergFn.body) &&
-      !/balance\s*-|excess|reserved|buybackBudget\s*\+|jackpot\s*\+|treasury\s*\+|rewardPool\s*\+/.test(
-        emergFn.body
-      );
-    if (drainsAll) {
+  if (hasStakeAccrual && has(/function\s+pendingReward\s*\(\s*address/)) {
+    const schemaBodyStake = extractVaultUISchemaBody(source) ?? "";
+    if (schemaBodyStake && !/\.name\s*=\s*"pendingReward"/.test(schemaBodyStake)) {
       add(
         "block",
-        "emergency-drains-reserved",
-        "emergencyWithdrawNative must withdraw only excess above sum(tracked native buckets) — never address(this).balance while buckets hold reserved funds."
+        "stake-pending-not-in-schema",
+        "pendingReward(address) must appear as a view method in vaultUISchema.methods."
+      );
+    }
+  }
+
+  // Staking: disclose Guardian Rule 009 trust in description/schema.
+  if (has(/function\s+stake\s*\(/) && has(/totalStaked/)) {
+    const stakeTrust = [
+      extractFunctionChunks(source).find((f) => f.name === "description")?.body ?? "",
+      extractVaultUISchemaBody(source) ?? "",
+    ].join("\n");
+    if (!/Guardian|Rule 009|emergency recovery|应急/i.test(stakeTrust)) {
+      add(
+        "block",
+        "staking-guardian-trust-undisclosed",
+        "Staking vault description()/vaultUISchema must disclose Guardian emergency recovery per Flap Rule 009."
       );
     }
   }
@@ -1601,6 +1754,23 @@ export function scanSafety(
     );
   }
 
+  // Staking: require(amount > 0) and fee-on-transfer balance delta.
+  if (stakeFnDirect && has(/function\s+stake\s*\(/) && has(/totalStaked/)) {
+    if (!/require\s*\(\s*amount\s*>\s*0/.test(stakeFnDirect.body)) {
+      add("block", "stake-zero-amount", "stake() must require(amount > 0, unicode\"... / ...\").");
+    }
+    if (
+      /safeTransferFrom\s*\(/.test(stakeFnDirect.body) &&
+      !/beforeBal|afterBal|received|balanceOf\s*\(\s*address\s*\(\s*this\s*\)\s*\)\s*-/.test(stakeFnDirect.body)
+    ) {
+      add(
+        "block",
+        "stake-no-balance-delta",
+        "stake() must credit actual tokens received (balance before/after safeTransferFrom) — taxToken may be fee-on-transfer."
+      );
+    }
+  }
+
   // Staking vaults should expose pendingReward(address) view for UI.
   if (hasStakeAccrual && !has(/function\s+pendingReward\s*\(\s*address/)) {
     add(
@@ -1610,21 +1780,7 @@ export function scanSafety(
     );
   }
 
-  // Stake vault: emergencyWithdrawToken must not drain user staked tokens.
-  if (has(/function\s+stake\s*\(/) && has(/totalStaked/) && has(/emergencyWithdrawToken/)) {
-    const emergTok = extractFunctionChunks(source).find((f) => f.name === "emergencyWithdrawToken");
-    if (
-      emergTok &&
-      /IERC20\s*\(\s*taxToken\s*\)|token\s*==\s*taxToken/.test(emergTok.body) &&
-      !/totalStaked|staked|reserved/.test(emergTok.body)
-    ) {
-      add(
-        "block",
-        "emergency-withdraws-staked",
-        "Override emergencyWithdrawToken for taxToken — withdraw only excess above totalStaked, never user stake principal."
-      );
-    }
-  }
+  // Rule 009: do not require staking vaults to block Guardian token drain — inherit base; disclose trust instead.
 
   // enter() on lottery/survivor should use nonReentrant when mutating entrant state.
   if (enterFn && has(/entrants\.push|hasEntered/) && !/nonReentrant/.test(enterFn.header)) {
@@ -1636,16 +1792,83 @@ export function scanSafety(
   }
 
   // Holder lottery: enter() should verify token balance when prompt implies holders-only.
-  if (
-    enterFn &&
-    /holder|hold token|token holder/i.test(userPrompt) &&
-    !/balanceOf\s*\(\s*msg\.sender\s*\)/.test(enterFn.body)
-  ) {
+  const descFn = extractFunctionChunks(source).find((f) => f.name === "description");
+  const descText = descFn?.body ?? "";
+  const holderImplied =
+    /holder|hold token|token holder/i.test(userPrompt) || /holder|持有/i.test(descText);
+  if (enterFn && holderImplied && !/balanceOf\s*\(\s*msg\.sender\s*\)/.test(enterFn.body)) {
     add(
       "block",
       "holder-lottery-no-balance",
-      "Holder lottery enter() must require(IERC20(taxToken).balanceOf(msg.sender) >= minimum) — verify the entrant holds tokens."
+      "Holder lottery enter() must require(IERC20(taxToken).balanceOf(msg.sender) >= minimum) — verify the entrant holds tokens, or say 'open entry' in description()."
     );
+  }
+
+  // AI lottery: jackpot >= fee leaves zero prize for winner.
+  const reqDrawFn = extractFunctionChunks(source).find((f) => f.name === "requestDraw");
+  if (
+    reqDrawFn &&
+    has(/FlapAIConsumerBase/) &&
+    /jackpot\s*>=\s*fee/.test(reqDrawFn.body) &&
+    !/jackpot\s*>\s*fee|MIN_PRIZE|minimum prize/i.test(reqDrawFn.body + source)
+  ) {
+    add(
+      "block",
+      "lottery-jackpot-fee-zero-prize",
+      "require(jackpot > fee) — jackpot >= fee lets the winner receive 0 after the oracle fee is deducted."
+    );
+  }
+
+  // AI lottery: push payout in oracle callback can revert on contract winners.
+  if (
+    fulfillFn &&
+    has(/FlapAIConsumerBase/) &&
+    has(/requestDraw/) &&
+    /_sendNative\s*\(\s*winner/.test(fulfillFn.body) &&
+    !/claimablePrize|claimPrize/.test(source)
+  ) {
+    add(
+      "block",
+      "ai-lottery-push-payout",
+      "In _fulfillReasoning credit claimablePrize[winner] and add claimPrize() — do not _sendNative(winner) in the oracle callback."
+    );
+  }
+
+  // AI lottery: indexer events for draw lifecycle.
+  if (has(/FlapAIConsumerBase/) && has(/function\s+requestDraw\s*\(/)) {
+    if (!has(/event DrawRequested/)) {
+      add("block", "ai-lottery-no-draw-requested", "Emit event DrawRequested(uint256 indexed requestId, uint256 entrantCount, uint256 fee) on requestDraw().");
+    } else if (reqDrawFn && !/emit DrawRequested/.test(reqDrawFn.body)) {
+      add("block", "ai-lottery-no-draw-requested-emit", "requestDraw() must emit DrawRequested after p.reason(...).");
+    }
+    if (!has(/event DrawRefunded/)) {
+      add("block", "ai-lottery-no-draw-refunded", "Declare event DrawRefunded(uint256 indexed requestId, uint256 fee) for oracle refunds.");
+    } else if (refundFn && !/emit DrawRefunded/.test(refundFn.body)) {
+      add("block", "ai-lottery-no-draw-refunded-emit", "_onFlapAIRequestRefunded must emit DrawRefunded(requestId, lastDrawFee).");
+    }
+    const setModelFn = extractFunctionChunks(source).find((f) => f.name === "setAiModel");
+    if (setModelFn) {
+      if (!has(/event AiModelUpdated/)) {
+        add("block", "ai-lottery-no-model-event", "Declare event AiModelUpdated(uint256 indexed modelId) and emit it from setAiModel().");
+      } else if (!/emit AiModelUpdated/.test(setModelFn.body)) {
+        add("block", "ai-lottery-no-model-event-emit", "setAiModel() must emit AiModelUpdated(id).");
+      }
+    }
+  }
+
+  // AI lottery: description must disclose provider trust, not vague "random".
+  if (has(/FlapAIConsumerBase/) && has(/requestDraw/)) {
+    const aiTrustText = [descText, extractVaultUISchemaBody(source) ?? ""].join("\n");
+    if (
+      /\brandom\b/i.test(aiTrustText) &&
+      !/AI provider|AI-provider|Flap AI|oracle selection|provider selection/i.test(aiTrustText)
+    ) {
+      add(
+        "block",
+        "ai-random-wording",
+        'description()/vaultUISchema must say "AI-provider selected" — bare "random winner/participant" hides provider trust.'
+      );
+    }
   }
 
   // Child must not override _buyAndBurn to burn full balance.
@@ -2127,7 +2350,7 @@ export async function generateVaultCode(
     model,
     apiKey,
     userPrompt: prompt,
-    systemPrompt: CODEGEN_SYSTEM_PROMPT,
+    systemPrompt: resolveSystemPrompt(CODEGEN_SYSTEM_PROMPT, prompt),
     stream: false,
   });
 
@@ -2195,7 +2418,7 @@ export async function generateVaultCodeStream(
       model,
       apiKey,
       userPrompt: prompt,
-      systemPrompt: STREAM_SYSTEM_PROMPT,
+      systemPrompt: resolveSystemPrompt(STREAM_SYSTEM_PROMPT, prompt),
       stream: true,
       emit,
     });
@@ -2237,7 +2460,8 @@ export async function generateVaultCodeRefineStream(
   const client = new OpenAI({ apiKey });
 
   const scanPrompt = `${session.initialPrompt}\n${message}`;
-  const seedMessages = buildRefineSeedMessages(session, message, REFINE_STREAM_SYSTEM_PROMPT);
+  const refineSystem = resolveSystemPrompt(REFINE_STREAM_SYSTEM_PROMPT, scanPrompt);
+  const seedMessages = buildRefineSeedMessages(session, message, refineSystem);
 
   try {
     emit({ type: "status", phase: "writing", attempt: 0, message: "Applying your refinement…" });
@@ -2247,7 +2471,7 @@ export async function generateVaultCodeRefineStream(
       model,
       apiKey,
       userPrompt: session.initialPrompt,
-      systemPrompt: REFINE_STREAM_SYSTEM_PROMPT,
+      systemPrompt: refineSystem,
       stream: true,
       emit,
       seedMessages,
@@ -2306,9 +2530,10 @@ Quality bar reminders:
 - Emit events for state changes; no silent try/catch
 - Lottery: no weekly timer on enter(); lastDrawTime = block.timestamp in constructor; MAX_ENTRANTS cap
 - Random outcomes: FlapAIConsumerBase only — never block.prevrandao / drawWinner() with on-chain entropy
-- Wording: "external AI provider selection" for AI draws — never "secure random" without VRF/proof
-- Staking: pendingRewards when totalStaked==0; pendingReward(address) view; no hidden auto-pay in updateUserReward
-- Bucket vaults: excess-only emergencyWithdrawNative (never drain reserved buckets)
+- Wording: "AI-provider selected" / "external AI provider selection" for AI draws — never "secure random" or bare "random" without disclosing provider trust
+- Staking: pendingRewards when totalStaked==0; pendingReward(address) in schema; balance delta on stake; require(amount>0); no auto-pay in stake(); disclose Guardian Rule 009 trust; DO NOT override emergency withdraw with excess-only logic
+- AI lottery: require(jackpot > fee) not >=; claimablePrize + claimPrize() not _sendNative(winner) in _fulfillReasoning
+- AI lottery events: DrawRequested on requestDraw; DrawRefunded on refund; AiModelUpdated on setAiModel
 - AI async: clear lastDrawFee after fulfill; delete drawSnapshot on refund; require(n <= 255) before uint8 cast
 - Survivor/elimination: rebuild entrants from drawSnapshot BEFORE delete drawSnapshot; never if (drawSnapshot.length == 1); count survivors after elimination; hasEntered[winner]=false on final payout
 - enter() nonReentrant; hasEntered reset when round ends
@@ -2333,10 +2558,22 @@ function safetyFixPromptStream(blocking: SafetyFinding[]): string {
   const list = blocking.map((f) => `- [${f.rule}] ${f.detail}`).join("\n");
   return `It compiles, but a Flap-spec safety scan found BLOCKING issues. Fix every one and re-output in the SAME plain-text format (CONTRACT_NAME / EXPLANATION / SOLIDITY). No imports/pragma.
 
-Quality bar: unicode bilingual requires; complete vaultUISchema (inputs/outputs/approvals on every method); view methods for public state; nonReentrant on payouts; events on state changes; lottery timing only on requestDraw (not enter); MAX_ENTRANTS <= 255; bucket emergencyWithdrawNative override; FlapAIConsumerBase for all random winner/elimination picks (never prevrandao).
+Quality bar: unicode bilingual requires; complete vaultUISchema (inputs/outputs/approvals on every method); view methods for public state; nonReentrant on payouts; events on state changes; lottery timing only on requestDraw (not enter); MAX_ENTRANTS <= 255; inherit Rule 009 emergency from base (no excess-only overrides); FlapAIConsumerBase for random picks; staking: balance delta, pendingReward in schema, Guardian trust disclosure; jackpot > fee; claimablePrize pull payment; DrawRequested/DrawRefunded/AiModelUpdated events; AI-provider wording in description.
 
 MANDATORY for AI lottery (_fulfillReasoning must include this before the closing brace):
         lastDrawFee = 0;
+
+MANDATORY for AI lottery payout (never push-pay in callback):
+        claimablePrize[winner] += prize;
+        emit WinnerPaid(winner, prize);
+   Add claimPrize() external nonReentrant pull payment.
+
+MANDATORY in requestDraw before fee deduct:
+        require(jackpot > fee, unicode"Prize too small after fee / 扣费后奖池太小");
+        emit DrawRequested(pendingRequestId, n, fee);
+
+MANDATORY in _onFlapAIRequestRefunded:
+        emit DrawRefunded(requestId, lastDrawFee);
 
 MANDATORY before uint8(n) in requestDraw:
         require(n > 0 && n <= type(uint8).max, unicode"Invalid entrant count / 无效参与者数量");
@@ -2361,10 +2598,11 @@ function surgicalSafetyFixPrompt(blocking: SafetyFinding[], repeatedMessage: str
 Re-output the FULL contract in plain-text format (CONTRACT_NAME / EXPLANATION / SOLIDITY). Do not skip any function.
 
 Apply these exact fixes if relevant:
-1. Inside _fulfillReasoning, after paying the winner and clearing entrants/drawSnapshot, add: lastDrawFee = 0;
-2. Inside requestDraw, before uint8(n) or the AI request, add: require(n > 0 && n <= type(uint8).max, unicode"Invalid entrant count / 无效参与者数量");
-3. _onFlapAIRequestRefunded must: pendingRequestId = 0; jackpot += lastDrawFee; lastDrawFee = 0; delete drawSnapshot;
-4. Survivor _fulfillReasoning: loop drawSnapshot to rebuild entrants BEFORE delete drawSnapshot; use survivors == 1 not drawSnapshot.length == 1; hasEntered[winner] = false on final win.
+1. Inside _fulfillReasoning, after crediting claimablePrize and clearing entrants/drawSnapshot, add: lastDrawFee = 0;
+2. Inside requestDraw, use require(jackpot > fee) not >=; before uint8(n): require(n > 0 && n <= type(uint8).max, ...); emit DrawRequested after p.reason
+3. _onFlapAIRequestRefunded must: emit DrawRefunded(requestId, lastDrawFee); pendingRequestId = 0; jackpot += lastDrawFee; lastDrawFee = 0; delete drawSnapshot;
+4. Use claimablePrize[winner] += prize and claimPrize() — never _sendNative(winner) in _fulfillReasoning
+5. Survivor _fulfillReasoning: loop drawSnapshot to rebuild entrants BEFORE delete drawSnapshot; use survivors == 1 not drawSnapshot.length == 1; hasEntered[winner] = false on final win.
 
 Blocking issues still present:
 

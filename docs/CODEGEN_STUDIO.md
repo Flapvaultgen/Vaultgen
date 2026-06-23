@@ -47,9 +47,11 @@ When the panel shows **Deploy ready**, you have compiled bytecode that cleared a
 
 ---
 
-Describe your token vault in plain English. The studio writes **real Flap-compliant Solidity**, checks it automatically, and shows you when it is ready to try on testnet.
+## Deploy paths
 
-You do not pick from a fixed template list — each vault is generated for your idea.
+**Studio default (testnet):** non-upgradeable constructor vault → `CodegenVaultFactory` CREATE2 bytecode deploy. Rule 009 emergency withdraw is inherited from `CodegenVaultBase` (Guardian full-balance drain — disclosed in staking/lottery descriptions).
+
+**Production (say "upgradeable" or "mainnet-ready" in your prompt):** generator switches to the FreeCoinBeacon pattern — `Initializable` vault + `UpgradeableBeacon` factory + `BeaconProxy`. No emergency drain functions on the vault; Guardian-only upgrades are the escape hatch.
 
 ---
 

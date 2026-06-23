@@ -163,15 +163,23 @@ export async function generateIntegrationTest(
             role: "system",
             content: `You write Foundry mainnet-fork integration tests for Flap codegen vaults deployed via CodegenVaultFactory.
 Return ONLY the Solidity test file (no markdown fences). Must compile with solc 0.8.13.
-Requirements:
+Requirements (Rule 006 minimum):
 - contract name ${contractName}MainnetTest extends FlapBSCFixture
 - import FlapBSCFixture from "../FlapBSCFixture.sol" and CodegenVaultFactory from "../../src/CodegenVaultFactory.sol"
 - load creation bytecode: vm.readFileBinary(string.concat("test/_codegen/", "${contractName}.bin"))
 - deploy via vaultPortal.newTokenV6WithVault with vaultData = creationCode
 - include string "${contractName}" in contract name and comments
-- tests: deploy vault, buyOnBC + dispatch, at least one core write smoke test if applicable
 - use vm.startPrank/vm.stopPrank (never bare vm.prank)
-- Reference methods: ${writeMethods.join(", ") || "receive only"}`,
+Tests to include where applicable:
+1. factory deploys vault on newTokenV6WithVault — vault != address(0)
+2. vault wired: taxProcessor.marketAddress() == vault
+3. buy on bonding curve + tax dispatch into receive() without revert
+4. post-graduation sell + dispatch without revert
+5. core vault write action succeeds (smoke)
+6. invalid/gated calls revert (double-claim, zero stake, unauthorized, etc.)
+7. if AI vault: callback/refund lifecycle or pendingRequestId guards
+8. if lottery/staking: edge cases (empty entrants, 1 staker, refund path) where feasible
+Reference write methods: ${writeMethods.join(", ") || "receive only"}`,
           },
           {
             role: "user",
