@@ -1,4 +1,4 @@
-export type SafetyFinding = { level: "block" | "warn"; rule: string; detail: string };
+export type SafetyFinding = { level: "block" | "warn"; rule: string; detail: string; sourceScope?: "child" | "full-injected" };
 
 export type SpecCheckStatus = "pass" | "warn" | "fail" | "na";
 
@@ -17,10 +17,28 @@ export type SpecAuditResult = {
 };
 
 export type FixLogEntry = {
-  phase: "writing" | "compile_fix" | "safety_fix" | "spec_fix" | "generating_tests" | "auditing";
+  phase: "writing" | "classifying" | "compile_fix" | "safety_fix" | "test_fix" | "spec_fix" | "generating_tests" | "auditing";
   attempt: number;
   rule?: string;
   message: string;
+};
+
+export type VaultPlan = {
+  kind: string;
+  usesNativeRewards: boolean;
+  usesEntrants: boolean;
+  usesFlapAI: boolean;
+  usesStaking: boolean;
+  requiresTokenHolding: boolean;
+  requiresPullPayments: boolean;
+  nativeBuckets: string[];
+  tokenCustodyBuckets: string[];
+  requiredPublicViews: string[];
+  requiredEvents: string[];
+  forbiddenPatterns: string[];
+  stateVariables: string[];
+  payoutMode: string;
+  riskDisclosure: string[];
 };
 
 export type CodegenResult = {
@@ -31,10 +49,12 @@ export type CodegenResult = {
   compileErrors: string;
   safety: { level: "pass" | "warn" | "fail"; findings: SafetyFinding[] };
   specAudit: SpecAuditResult;
+  vaultPlan: VaultPlan;
   abi: unknown[] | null;
   bytecodeSize: number | null;
   attempts: number;
   integrationTestPath: string | null;
+  integrationTestsPassed: boolean;
   fixLog: FixLogEntry[];
   autoFixExhausted: boolean;
   mode: "openai" | "stub";
@@ -54,7 +74,7 @@ import { apiUrl, initApiBase } from "./api-base";
 export type CodegenEvent =
   | {
       type: "status";
-      phase: "writing" | "fixing" | "fixing_spec" | "compiling" | "compile_failed" | "auditing" | "generating_tests" | "done" | "error";
+      phase: "writing" | "classifying" | "fixing" | "fixing_spec" | "test_fix" | "compiling" | "compile_failed" | "auditing" | "generating_tests" | "done" | "error";
       attempt: number;
       maxAttempts?: number;
       message?: string;

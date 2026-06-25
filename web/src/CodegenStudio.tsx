@@ -248,7 +248,7 @@ export default function CodegenStudio({ onChatActive }: Props) {
     !!result &&
     result.compiled &&
     result.safety.level !== "fail" &&
-    result.specAudit.level !== "fail";
+    (result.integrationTestsPassed || !result.integrationTestPath);
   const safety = result ? SAFETY[result.safety.level] : null;
   const specLevel = result?.specAudit.level;
   const specFails = result ? specFailRules(result.specAudit) : [];

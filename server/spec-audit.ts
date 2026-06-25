@@ -232,7 +232,11 @@ export async function runSpecAudit(
   contractName: string,
   apiKey: string | undefined,
   model: string,
-  opts?: { compiled?: boolean; safetyFindings?: { level: "block" | "warn"; rule: string; detail: string }[] }
+  opts?: {
+    compiled?: boolean;
+    safetyFindings?: { level: "block" | "warn"; rule: string; detail: string }[];
+    advisory?: boolean;
+  }
 ): Promise<SpecAuditResult> {
   if (!opts?.compiled) {
     return {
@@ -344,10 +348,27 @@ Report PASS/WARN/FAIL/NA for each of the 9 rules.`;
   }
   items = applyCodegenAuditPolicies(items);
 
+  // Advisory mode: LLM findings are informational — only deterministic Rule 006 fail blocks pipeline.
+  if (opts?.advisory) {
+    items = items.map((item) => {
+      if (item.status === "fail" && item.id !== "006-integration-test-coverage") {
+        return {
+          ...item,
+          status: "warn" as SpecCheckStatus,
+          detail: `[advisory] ${item.detail}`,
+        };
+      }
+      return item;
+    });
+  }
+
   const level = computeLevel(items);
+  const summary = opts?.advisory
+    ? `${parsed.summary} (Advisory pre-audit — deterministic scanners and Foundry tests are the pass/fail gate.)`
+    : parsed.summary;
   return {
     level,
-    summary: parsed.summary,
+    summary,
     items,
     mode: "openai",
   };

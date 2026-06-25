@@ -5,8 +5,10 @@ export const MAX_PIPELINE_ATTEMPTS = 12;
 export type PipelinePhase =
   | "idle"
   | "writing"
+  | "classifying"
   | "fixing"
   | "fixing_spec"
+  | "test_fix"
   | "compiling"
   | "compile_failed"
   | "auditing"
@@ -23,8 +25,10 @@ export type CodeResetInfo = {
 
 export const FIX_PHASE_LABEL: Record<FixLogEntry["phase"], string> = {
   writing: "Initial draft",
+  classifying: "Vault classification",
   compile_fix: "Compile error",
   safety_fix: "Safety fix",
+  test_fix: "Test failure",
   spec_fix: "Spec fix",
   generating_tests: "Test generation",
   auditing: "Pre-audit",
@@ -38,6 +42,10 @@ export function describeFixEntry(entry: FixLogEntry): string {
       return entry.rule ? `${entry.rule}: ${entry.message.slice(0, 120)}` : entry.message.slice(0, 140);
     case "spec_fix":
       return entry.rule ? `Rules ${entry.rule} — ${entry.message.slice(0, 100)}` : entry.message.slice(0, 140);
+    case "test_fix":
+      return entry.message.slice(0, 140);
+    case "classifying":
+      return "Classifying vault mechanic";
     case "generating_tests":
       return entry.message.includes("/") ? "Integration test written" : entry.message.slice(0, 120);
     case "auditing":
@@ -83,11 +91,14 @@ export function describePipelineHeadline(
       return "Compile failed — preparing another AI pass…";
     case "fixing":
     case "fixing_spec":
+    case "test_fix":
       return `Auto-fixing issues (pass ${attempt} of ${maxAttempts})…`;
+    case "classifying":
+      return "Classifying vault mechanic…";
     case "generating_tests":
       return "Generating integration test…";
     case "auditing":
-      return "Running Flap pre-audit…";
+      return "Running Flap pre-audit (advisory)…";
     default:
       return "Working…";
   }

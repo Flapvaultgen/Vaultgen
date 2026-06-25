@@ -266,6 +266,64 @@ const cases: Case[] = [
     expectRules: ["survivor-stale-snapshot-win", "survivor-rebuild-after-delete", "vault-logic"],
   },
   {
+    name: "bad-stake-erases-pending-reward",
+    prompt: "stake to earn",
+    code: `${BASE}
+    uint256 public totalStaked; uint256 public accRewardPerShare;
+    struct UserInfo { uint256 amount; uint256 rewardDebt; }
+    mapping(address => UserInfo) public userInfo;
+    receive() external payable { if (totalStaked > 0) accRewardPerShare += msg.value * 1e18 / totalStaked; }
+    function stake(uint256 amount) external nonReentrant {
+        require(amount > 0, unicode"x / x");
+        IERC20(taxToken).safeTransferFrom(msg.sender, address(this), amount);
+        userInfo[msg.sender].amount += amount;
+        totalStaked += amount;
+        userInfo[msg.sender].rewardDebt = (userInfo[msg.sender].amount * accRewardPerShare) / 1e18;
+    }
+    function claimReward() external nonReentrant {
+        uint256 pending = (userInfo[msg.sender].amount * accRewardPerShare) / 1e18 - userInfo[msg.sender].rewardDebt;
+        userInfo[msg.sender].rewardDebt = (userInfo[msg.sender].amount * accRewardPerShare) / 1e18;
+        _sendNative(msg.sender, pending);
+    }
+    function pendingReward(address) external view returns (uint256) { return 0; }
+    function description() public view override returns (string memory) { return unicode"Guardian Rule 009 stake / 质押"; }
+    function vaultUISchema() public pure override returns (VaultUISchema memory s) {
+        s.vaultType = "T"; s.description = unicode"Guardian emergency / 应急"; s.methods = new VaultMethodSchema[](0);
+    }
+}`,
+    expectRules: ["stake-erases-pending-reward", "vault-logic"],
+  },
+  {
+    name: "bad-pendingreward-claim-mismatch",
+    prompt: "stake rewards",
+    code: `${BASE}
+    uint256 public totalStaked; uint256 public accRewardPerShare; uint256 public undistributedRewards;
+    struct UserInfo { uint256 amount; uint256 rewardDebt; }
+    mapping(address => UserInfo) public userInfo;
+    receive() external payable { if (totalStaked == 0) undistributedRewards += msg.value; else accRewardPerShare += msg.value * 1e18 / totalStaked; }
+    function stake(uint256 amount) external nonReentrant {
+        require(amount > 0, unicode"x / x");
+        if (totalStaked == 0 && undistributedRewards > 0) { accRewardPerShare += undistributedRewards * 1e18 / amount; undistributedRewards = 0; }
+        userInfo[msg.sender].amount += amount; totalStaked += amount;
+    }
+    function claimReward() external nonReentrant {
+        uint256 pending = (userInfo[msg.sender].amount * accRewardPerShare) / 1e18 - userInfo[msg.sender].rewardDebt;
+        userInfo[msg.sender].rewardDebt = (userInfo[msg.sender].amount * accRewardPerShare) / 1e18;
+        _sendNative(msg.sender, pending);
+    }
+    function pendingReward(address user) external view returns (uint256) {
+        uint256 acc = accRewardPerShare;
+        if (totalStaked > 0 && undistributedRewards > 0) acc += (undistributedRewards * 1e18) / totalStaked;
+        return (userInfo[user].amount * acc) / 1e18 - userInfo[user].rewardDebt;
+    }
+    function description() public view override returns (string memory) { return unicode"Guardian Rule 009 stake / 质押"; }
+    function vaultUISchema() public pure override returns (VaultUISchema memory s) {
+        s.vaultType = "T"; s.description = unicode"Guardian emergency / 应急"; s.methods = new VaultMethodSchema[](0);
+    }
+}`,
+    expectRules: ["pendingreward-claim-mismatch", "vault-logic"],
+  },
+  {
     name: "good-rewardpool-pattern",
     prompt: "stake dividend",
     code: `${BASE}

@@ -4,8 +4,17 @@ import { mkdir, writeFile, rm, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { runSpecAudit, specCodegenFixableItems, specFixPrompt, specFixPromptStream, type SpecAuditResult } from "./spec-audit.js";
-import { generateIntegrationTest } from "./test-gen.js";
+import { runSpecAudit, type SpecAuditResult } from "./spec-audit.js";
+import { generateIntegrationTest, runIntegrationTests } from "./test-gen.js";
+import {
+  classifyVaultPlan,
+  buildVaultPlanPromptAppendix,
+  getVaultKindInvariants,
+  inferVaultPlanFromPrompt,
+  isStakingPlan,
+  isLotteryPlan,
+  type VaultPlan,
+} from "./vault-plan.js";
 
 const execAsync = promisify(exec);
 
@@ -24,10 +33,26 @@ export type SafetyFinding = {
   level: "block" | "warn";
   rule: string;
   detail: string;
+  sourceScope?: "child" | "full-injected";
+};
+
+export type ScanSafetyOptions = {
+  sourceScope?: "child" | "full-injected";
+  vaultPlan?: VaultPlan;
+  childSource?: string;
+  fullSourceOnly?: boolean;
 };
 
 export type FixLogEntry = {
-  phase: "writing" | "compile_fix" | "safety_fix" | "spec_fix" | "generating_tests" | "auditing";
+  phase:
+    | "writing"
+    | "classifying"
+    | "compile_fix"
+    | "safety_fix"
+    | "test_fix"
+    | "spec_fix"
+    | "generating_tests"
+    | "auditing";
   attempt: number;
   rule?: string;
   message: string;
@@ -41,10 +66,12 @@ export type CodegenResult = {
   compileErrors: string;
   safety: { level: SafetyLevel; findings: SafetyFinding[] };
   specAudit: SpecAuditResult;
+  vaultPlan: VaultPlan;
   abi: unknown[] | null;
   bytecodeSize: number | null;
   attempts: number;
   integrationTestPath: string | null;
+  integrationTestsPassed: boolean;
   fixLog: FixLogEntry[];
   autoFixExhausted: boolean;
   mode: "openai" | "stub";
@@ -271,11 +298,13 @@ D. If you STAKE real tokens, you MUST pull them: IERC20(taxToken).transferFrom(m
 
 STAKING (accRewardPerShare) — reference pattern the scanner enforces:
 - struct UserInfo { uint256 amount; uint256 rewardDebt; }
-- receive(): if totalStaked == 0, pendingRewards += msg.value (single undistributed bucket).
-  if totalStaked > 0, accRewardPerShare += msg.value * 1e18 / totalStaked.
+- uint256 public constant REWARD_PRECISION = 1e18;
+- receive(): if totalStaked == 0, undistributedRewards += msg.value (single undistributed bucket).
+  if totalStaked > 0, accRewardPerShare += msg.value * REWARD_PRECISION / totalStaked.
   NEVER mix accRewardPerShare += in receive with rewardPool -= on payout — pick ONE model.
-- stake(): require(amount > 0). If pendingRewards > 0, roll BEFORE increasing totalStaked using
-  denominator (totalStaked + received) so the FIRST staker also receives pre-stake tax.
+- pendingReward(user): use accRewardPerShare only — do NOT include undistributedRewards unless claimReward also distributes it.
+- stake(): require(amount > 0). Claim or preserve pending BEFORE changing user.amount.
+  If undistributedRewards > 0, roll BEFORE increasing totalStaked using denominator (totalStaked + received).
 - claimReward(): compute pending, pay _sendNative, update rewardDebt — do NOT call an internal
   harvest helper that also pays (no double-harvest). Do NOT auto-pay inside stake() if claimReward exists.
 - Add pendingReward(address user) external view — MUST also appear in vaultUISchema.methods.
@@ -582,9 +611,14 @@ function wantsUpgradeableMode(prompt: string): boolean {
   return /\b(production|upgradeable|beacon|mainnet-ready|mainnet ready)\b/i.test(prompt);
 }
 
-function resolveSystemPrompt(base: string, userPrompt: string): string {
-  return wantsUpgradeableMode(userPrompt) ? `${base}${UPGRADEABLE_MODE_APPENDIX}` : base;
+function resolveSystemPrompt(base: string, userPrompt: string, vaultPlan?: VaultPlan): string {
+  let prompt = base;
+  if (vaultPlan) prompt += buildVaultPlanPromptAppendix(vaultPlan);
+  if (wantsUpgradeableMode(userPrompt)) prompt += UPGRADEABLE_MODE_APPENDIX;
+  return prompt;
 }
+
+export { classifyVaultPlan, type VaultPlan } from "./vault-plan.js";
 
 export type RefineChatTurn = { role: "user" | "assistant"; content: string };
 
@@ -791,12 +825,19 @@ function publicStateMissingFromUISchema(source: string, schemaBody: string): str
 }
 
 /** Prompt-aware logic checks beyond structural patterns — used by scanSafety and verify-codegen. */
-export function scanVaultLogic(source: string, userPrompt = ""): string[] {
+export function scanVaultLogic(source: string, userPrompt = "", vaultPlan?: VaultPlan): string[] {
   const issues: string[] = [];
   const prompt = userPrompt.toLowerCase();
-  const isStake = /stake|dividend|earn|reward/i.test(prompt) || (/accRewardPerShare/.test(source) && /function\s+stake\s*\(/.test(source));
-  const isBuyback = /buyback/i.test(prompt) || /buybackBudget/.test(source);
-  const isLottery = /lottery|raffle|jackpot/i.test(prompt) || (/FlapAIConsumerBase/.test(source) && /entrants/.test(source));
+  const isStake =
+    isStakingPlan(vaultPlan ?? { kind: "treasury", usesStaking: false } as VaultPlan) ||
+    /stake|dividend|earn|reward/i.test(prompt) ||
+    (/accRewardPerShare/.test(source) && /function\s+stake\s*\(/.test(source));
+  const isBuyback =
+    vaultPlan?.kind === "buyback" || /buyback/i.test(prompt) || /buybackBudget/.test(source);
+  const isLottery =
+    isLotteryPlan(vaultPlan ?? { kind: "treasury", usesFlapAI: false, usesEntrants: false } as VaultPlan) ||
+    /lottery|raffle|jackpot/i.test(prompt) ||
+    (/FlapAIConsumerBase/.test(source) && /entrants/.test(source));
 
   if (isStake) {
     const recv = source.match(/receive\s*\(\s*\)\s*external\s+payable[^{]*\{([\s\S]*?)^\s*\}/m)?.[1] ?? "";
@@ -856,6 +897,31 @@ export function scanVaultLogic(source: string, userPrompt = ""): string[] {
     }
     if (/function claimReward/.test(source) && /_sendNative\s*\(/.test(stakeFnBody)) {
       issues.push("stake() auto-pays rewards while claimReward() exists — sync via claimReward only");
+    }
+    // stake-erases-pending-reward: rewardDebt reset after amount increase without prior claim/accrual.
+    if (
+      /user\.amount\s*\+=/.test(stakeFnBody) &&
+      /rewardDebt\s*=/.test(stakeFnBody) &&
+      !/(?:pending|_claim|claimReward|_updateReward|updateUserReward|_updatePool|updatePool|_accrue|accrue)[\s\S]{0,400}user\.amount\s*\+=/.test(
+        stakeFnBody
+      ) &&
+      stakeFnBody.indexOf("rewardDebt =") > stakeFnBody.search(/user\.amount\s*\+=/)
+    ) {
+      issues.push(
+        "stake() resets rewardDebt after increasing user.amount without first claiming or preserving pending rewards"
+      );
+    }
+    // pendingreward-claim-mismatch: view shows undistributed/pending pool rewards claimReward cannot pay.
+    const pendingViewBody = findFunctionBody(source, "pendingReward") ?? "";
+    const claimBodyFull = findFunctionBody(source, "claimReward") ?? findFunctionBody(source, "claim") ?? "";
+    const viewIncludesPool =
+      /undistributedRewards|pendingRewards/.test(pendingViewBody) &&
+      /accRewardPerShare[\s\S]{0,200}(undistributedRewards|pendingRewards)/.test(pendingViewBody);
+    const claimDistributesPool =
+      /undistributedRewards|pendingRewards/.test(claimBodyFull) &&
+      /(undistributedRewards\s*=\s*0|pendingRewards\s*=\s*0|accRewardPerShare\s*\+=)/.test(claimBodyFull);
+    if (viewIncludesPool && !claimDistributesPool) {
+      issues.push("pendingReward(address) includes undistributedRewards but claimReward() does not distribute them");
     }
     const schemaBody = extractVaultUISchemaBody(source) ?? "";
     if (/function pendingReward\s*\(\s*address/.test(source) && schemaBody && !/\.name\s*=\s*"pendingReward"/.test(schemaBody)) {
@@ -1015,10 +1081,23 @@ export function scanVaultLogic(source: string, userPrompt = ""): string[] {
 export function scanSafety(
   source: string,
   contractName: string,
-  userPrompt = ""
+  userPrompt = "",
+  opts: ScanSafetyOptions = {}
 ): { level: SafetyLevel; findings: SafetyFinding[] } {
+  const { sourceScope = "child", vaultPlan, childSource, fullSourceOnly = false } = opts;
   const findings: SafetyFinding[] = [];
-  const add = (level: "block" | "warn", rule: string, detail: string) => findings.push({ level, rule, detail });
+  const add = (level: "block" | "warn", rule: string, detail: string) =>
+    findings.push({ level, rule, detail, sourceScope });
+
+  if (fullSourceOnly) {
+    scanSafetyFullInjected(source, childSource ?? source, userPrompt, vaultPlan, add);
+    const level: SafetyLevel = findings.some((f) => f.level === "block")
+      ? "fail"
+      : findings.length
+        ? "warn"
+        : "pass";
+    return { level, findings };
+  }
 
   const has = (re: RegExp) => re.test(source);
   const hasBuyback =
@@ -1769,6 +1848,40 @@ export function scanSafety(
         "stake() must credit actual tokens received (balance before/after safeTransferFrom) — taxToken may be fee-on-transfer."
       );
     }
+    // stake-erases-pending-reward
+    if (
+      /user\.amount\s*\+=|userInfo\[msg\.sender\]\.amount\s*\+=/.test(stakeFnDirect.body) &&
+      /rewardDebt\s*=/.test(stakeFnDirect.body) &&
+      !/(?:pending|_claim|claimReward|_updateReward|updateUserReward|_updatePool|updatePool)[\s\S]{0,500}(?:user\.amount\s*\+=|userInfo\[msg\.sender\]\.amount\s*\+=)/.test(
+        stakeFnDirect.body
+      ) &&
+      stakeFnDirect.body.search(/rewardDebt\s*=/) > stakeFnDirect.body.search(/(?:user\.amount\s*\+=|userInfo\[msg\.sender\]\.amount\s*\+=)/)
+    ) {
+      add(
+        "block",
+        "stake-erases-pending-reward",
+        "stake() resets rewardDebt after increasing user.amount without first claiming or preserving pending rewards."
+      );
+    }
+  }
+
+  // pendingreward-claim-mismatch
+  const pendingViewFn = extractFunctionChunks(source).find((f) => f.name === "pendingReward");
+  const claimFnStake = extractFunctionChunks(source).find((f) => f.name === "claimReward" || f.name === "claim");
+  if (pendingViewFn && claimFnStake && hasStakeAccrual) {
+    const viewIncludesPool =
+      /undistributedRewards|pendingRewards/.test(pendingViewFn.body) &&
+      /accRewardPerShare[\s\S]{0,250}(undistributedRewards|pendingRewards)/.test(pendingViewFn.body);
+    const claimDistributesPool =
+      /undistributedRewards|pendingRewards/.test(claimFnStake.body) &&
+      /(undistributedRewards\s*=\s*0|pendingRewards\s*=\s*0|accRewardPerShare\s*\+=)/.test(claimFnStake.body);
+    if (viewIncludesPool && !claimDistributesPool) {
+      add(
+        "block",
+        "pendingreward-claim-mismatch",
+        "pendingReward(address) includes undistributedRewards/pendingRewards but claimReward() does not roll or distribute them — UI shows unclaimable rewards."
+      );
+    }
   }
 
   // Staking vaults should expose pendingReward(address) view for UI.
@@ -1885,9 +1998,89 @@ export function scanSafety(
     );
   }
 
-  for (const detail of scanVaultLogic(source, userPrompt)) {
+  for (const detail of scanVaultLogic(source, userPrompt, vaultPlan)) {
     if (findings.some((f) => f.detail === detail)) continue;
     add("block", "vault-logic", detail);
+  }
+
+  const level: SafetyLevel = findings.some((f) => f.level === "block")
+    ? "fail"
+    : findings.length
+      ? "warn"
+      : "pass";
+  return { level, findings };
+}
+
+/** Full-injected source checks — inherited base emergency + custody context. */
+function scanSafetyFullInjected(
+  fullSource: string,
+  childSource: string,
+  userPrompt: string,
+  vaultPlan: VaultPlan | undefined,
+  add: (level: "block" | "warn", rule: string, detail: string) => void
+): void {
+  const isStake =
+    isStakingPlan(vaultPlan ?? { kind: "treasury", usesStaking: false } as VaultPlan) ||
+    (/function\s+stake\s*\(/.test(childSource) && /totalStaked/.test(childSource));
+
+  if (!isStake) return;
+
+  const childOverridesNative = /function\s+emergencyWithdrawNative\s*\(/.test(childSource);
+  const childOverridesToken = /function\s+emergencyWithdrawToken\s*\(/.test(childSource);
+  const stakeTrust = [
+    extractFunctionChunks(childSource).find((f) => f.name === "description")?.body ?? "",
+    extractVaultUISchemaBody(childSource) ?? "",
+  ].join("\n");
+  const disclosed = /Guardian|Rule 009|emergency recovery|应急|staked token/i.test(stakeTrust);
+
+  if (!childOverridesNative && /function\s+emergencyWithdrawNative\s*\(/.test(fullSource)) {
+    add(
+      disclosed ? "warn" : "block",
+      "staking-native-emergency-drain",
+      "Inherited emergencyWithdrawNative drains all BNB including claimable rewards. Disclose Guardian Rule 009 in description/schema or override with explicit policy."
+    );
+  }
+
+  if (
+    !childOverridesToken &&
+    /function\s+emergencyWithdrawToken\s*\(/.test(fullSource) &&
+    /safeTransferFrom\s*\(/.test(childSource)
+  ) {
+    add(
+      disclosed ? "warn" : "block",
+      "staking-guardian-token-drain",
+      "Inherited emergencyWithdrawToken can drain staked taxToken. Disclose Guardian can recover staked tokens in description/schema."
+    );
+  }
+}
+
+/** Run scanners on child + full injected source; dedupe by rule+scope. */
+export function scanSafetyCombined(
+  childSource: string,
+  fullSource: string,
+  contractName: string,
+  userPrompt: string,
+  vaultPlan?: VaultPlan
+): { level: SafetyLevel; findings: SafetyFinding[] } {
+  const child = scanSafety(childSource, contractName, userPrompt, {
+    sourceScope: "child",
+    vaultPlan,
+    childSource,
+  });
+  const full = scanSafety(fullSource, contractName, userPrompt, {
+    sourceScope: "full-injected",
+    vaultPlan,
+    childSource,
+    fullSourceOnly: true,
+  });
+
+  const seen = new Set<string>();
+  const findings: SafetyFinding[] = [];
+  for (const f of [...child.findings, ...full.findings]) {
+    const key = `${f.rule}:${f.sourceScope}:${f.detail.slice(0, 80)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    findings.push(f);
   }
 
   const level: SafetyLevel = findings.some((f) => f.level === "block")
@@ -1989,8 +2182,10 @@ Return the FULL updated contract with the refinement applied.`,
 
 export type CodegenStatusPhase =
   | "writing"
+  | "classifying"
   | "fixing"
   | "fixing_spec"
+  | "test_fix"
   | "compiling"
   | "compile_failed"
   | "auditing"
@@ -2051,6 +2246,10 @@ function humanStatusMessage(phase: CodegenStatusPhase, attempt: number, message?
       return message ? `Fixing safety issues (${message})…` : "Fixing safety scanner issues…";
     case "fixing_spec":
       return message ? `Fixing Flap spec rules (${message})…` : "Fixing Flap spec compliance…";
+    case "test_fix":
+      return message ? `Fixing integration test failures (${message})…` : "Fixing behavioral test failures…";
+    case "classifying":
+      return "Classifying vault mechanic and building invariant plan…";
     case "generating_tests":
       return message ?? "Generating integration test (Rule 006)…";
     case "auditing":
@@ -2087,6 +2286,13 @@ function describeCodeReset(lastFix: FixLogEntry | undefined, attempt: number): P
       reason: "retry",
       retryKind: kind,
       message: `Flap pre-audit found issues${lastFix.rule ? ` (${lastFix.rule})` : ""}. Starting pass ${attempt} to fix them.`,
+    };
+  }
+  if (kind === "test_fix") {
+    return {
+      reason: "retry",
+      retryKind: kind,
+      message: `Integration/invariant tests failed. Starting pass ${attempt} to fix vault logic.`,
     };
   }
   return {
@@ -2140,7 +2346,7 @@ async function aiGenerateStream(
   };
 }
 
-/** Unified pipeline: compile → safety → tests → audit → fix until spec !== fail or budget exhausted. */
+/** Unified pipeline: classify → compile → dual safety → tests → advisory audit → fix until pass or budget exhausted. */
 async function runCodegenPipeline(opts: {
   client: import("openai").default;
   model: string;
@@ -2151,17 +2357,34 @@ async function runCodegenPipeline(opts: {
   emit?: (ev: CodegenEvent) => void;
   seedMessages?: ChatMessage[];
   scanPrompt?: string;
+  vaultPlan?: VaultPlan;
 }): Promise<Omit<CodegenResult, "mode">> {
-  const { client, model, apiKey, userPrompt, systemPrompt, stream, emit, seedMessages, scanPrompt } = opts;
+  const { client, model, apiKey, userPrompt, systemPrompt, stream, emit, seedMessages, scanPrompt, vaultPlan: seedPlan } =
+    opts;
   const safetyPrompt = scanPrompt ?? userPrompt;
+
+  let vaultPlan = seedPlan;
+  if (!vaultPlan) {
+    emit?.({ type: "status", phase: "classifying", attempt: 0, message: "Classifying vault mechanic…" });
+    vaultPlan = await classifyVaultPlan(userPrompt, apiKey, model);
+  }
+
+  const resolvedSystemPrompt = systemPrompt.includes("VAULT PLAN")
+    ? systemPrompt
+    : resolveSystemPrompt(systemPrompt.replace(/VAULT PLAN[\s\S]*$/, "").trim() || systemPrompt, userPrompt, vaultPlan);
+
   const messages: ChatMessage[] =
     seedMessages ??
     [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: `Write the vault contract for this idea:\n\n${userPrompt}` },
+      { role: "system", content: resolvedSystemPrompt },
+      {
+        role: "user",
+        content: `Write the vault contract for this idea:\n\n${userPrompt}\n\nVault kind: ${vaultPlan.kind}. Commit to the VaultPlan invariants before writing code.`,
+      },
     ];
 
   const fixLog: FixLogEntry[] = [];
+  const previousFailures = new Set<string>();
   let contractName = "GeneratedVault";
   let code = "";
   let explanation = "";
@@ -2171,13 +2394,14 @@ async function runCodegenPipeline(opts: {
   let filePath = "";
   let attempts = 0;
   let integrationTestPath: string | null = null;
+  let integrationTestsPassed = false;
   let specAudit: SpecAuditResult = {
     level: "skipped",
     summary: "Not audited yet.",
     items: [],
     mode: "openai",
   };
-  let safety = scanSafety("", "GeneratedVault", safetyPrompt);
+  let safety = scanSafety("", "GeneratedVault", safetyPrompt, { vaultPlan });
   let abi: unknown[] | null = null;
   let bytecodeSize: number | null = null;
   let fullSource = "";
@@ -2206,7 +2430,7 @@ async function runCodegenPipeline(opts: {
 
     attempts++;
     const lastFix = attempts > 1 ? fixLog[fixLog.length - 1] : undefined;
-    status(attempts === 1 ? "writing" : lastFix?.phase === "spec_fix" ? "fixing_spec" : "fixing");
+    status(attempts === 1 ? "writing" : lastFix?.phase === "test_fix" ? "test_fix" : lastFix?.phase === "spec_fix" ? "fixing_spec" : "fixing");
 
     let lastAssistant: string;
     if (stream && emit) {
@@ -2243,9 +2467,19 @@ async function runCodegenPipeline(opts: {
       continue;
     }
 
-    safety = scanSafety(code, contractName, safetyPrompt);
+    fullSource = `${PREAMBLE}\n${code.trim()}\n`;
+    if (filePath) {
+      try {
+        fullSource = await readFile(filePath, "utf8");
+      } catch {
+        /* use in-memory */
+      }
+    }
+
+    safety = scanSafetyCombined(code, fullSource, contractName, safetyPrompt, vaultPlan);
     const blocking = safety.findings.filter((f) => f.level === "block");
     if (blocking.length > 0) {
+      for (const b of blocking) previousFailures.add(b.rule);
       pushFix({
         phase: "safety_fix",
         attempt: attempts,
@@ -2257,27 +2491,20 @@ async function runCodegenPipeline(opts: {
       const recentSafety = fixLog.filter((f) => f.phase === "safety_fix").slice(-3);
       const stuck =
         recentSafety.length >= 3 &&
-        recentSafety.every((f) => f.message === recentSafety[0]!.message);
-      pendingFix = stuck
-        ? surgicalSafetyFixPrompt(blocking, recentSafety[0]!.message)
+        recentSafety.every((f) => f.rule === recentSafety[0]!.rule);
+      const sameRuleCount = blocking.filter((b) => previousFailures.has(b.rule)).length;
+      pendingFix = stuck || sameRuleCount >= 3
+        ? surgicalSafetyFixPrompt(blocking, recentSafety[0]?.message ?? blocking[0]!.detail, vaultPlan)
         : stream
-          ? safetyFixPromptStream(blocking)
-          : safetyFixPrompt(blocking);
+          ? safetyFixPromptStream(blocking, vaultPlan, attempts, [...previousFailures])
+          : safetyFixPrompt(blocking, vaultPlan, attempts, [...previousFailures]);
       continue;
     }
 
-    fullSource = `${PREAMBLE}\n${code.trim()}\n`;
-    if (filePath) {
-      try {
-        fullSource = await readFile(filePath, "utf8");
-      } catch {
-        /* use in-memory */
-      }
-    }
     ({ abi, bytecodeSize } = await readArtifact(artifactPath));
 
     status("generating_tests", "Writing integration test (Rule 006)…");
-    const tr = await generateIntegrationTest(contractName, artifactPath, fullSource, apiKey, model);
+    const tr = await generateIntegrationTest(contractName, artifactPath, fullSource, apiKey, model, vaultPlan);
     if (tr.ok) {
       integrationTestPath = tr.path;
       pushFix({ phase: "generating_tests", attempt: attempts, message: tr.path });
@@ -2285,35 +2512,40 @@ async function runCodegenPipeline(opts: {
       pushFix({ phase: "generating_tests", attempt: attempts, message: tr.errors.slice(0, 160) });
     }
 
-    status("auditing", "Flap pre-audit (spec checker)…");
+    if (tr.path) {
+      status("generating_tests", "Running Foundry invariant tests…");
+      const testRun = await runIntegrationTests(contractName, tr.path);
+      integrationTestsPassed = testRun.ok || testRun.skipped === true;
+      if (!testRun.ok && !testRun.skipped) {
+        previousFailures.add("integration-test-failure");
+        pushFix({
+          phase: "test_fix",
+          attempt: attempts,
+          rule: "integration-test-failure",
+          message: testRun.errors.slice(0, 200),
+        });
+        status("test_fix", "integration-test-failure");
+        messages.push({ role: "assistant", content: lastAssistant });
+        pendingFix = stream
+          ? testFixPromptStream(testRun.errors, vaultPlan, attempts, [...previousFailures])
+          : testFixPrompt(testRun.errors, vaultPlan, attempts, [...previousFailures]);
+        continue;
+      }
+    }
+
+    status("auditing", "Flap pre-audit (advisory)…");
     specAudit = await runSpecAudit(fullSource, contractName, apiKey, model, {
       compiled: true,
       safetyFindings: safety.findings,
+      advisory: true,
     });
     emit?.({ type: "spec_audit", audit: specAudit });
-    pushFix({ phase: "auditing", attempt: attempts, message: `spec: ${specAudit.level}` });
+    pushFix({ phase: "auditing", attempt: attempts, message: `spec: ${specAudit.level} (advisory)` });
 
-    if (specAudit.level !== "fail") break;
-
-    const fixable = specCodegenFixableItems(specAudit.items);
-    if (fixable.length === 0) break;
-
-    pushFix({
-      phase: "spec_fix",
-      attempt: attempts,
-      rule: fixable.map((f) => f.id).join(","),
-      message: fixable.map((f) => f.title).join("; "),
-    });
-    status("fixing_spec", fixable.map((f) => f.id).join(", "));
-    messages.push({ role: "assistant", content: lastAssistant });
-    pendingFix = stream ? specFixPromptStream(fixable) : specFixPrompt(fixable);
+    break;
   }
 
   if (!fullSource && code) fullSource = `${PREAMBLE}\n${code.trim()}\n`;
-
-  const remainingFails = specCodegenFixableItems(specAudit.items);
-  const autoFixExhausted =
-    specAudit.level === "fail" && (attempts >= MAX_PIPELINE_ATTEMPTS || remainingFails.length === 0);
 
   return {
     contractName,
@@ -2323,12 +2555,14 @@ async function runCodegenPipeline(opts: {
     compileErrors,
     safety,
     specAudit,
+    vaultPlan,
     abi,
     bytecodeSize,
     attempts,
     integrationTestPath,
+    integrationTestsPassed,
     fixLog,
-    autoFixExhausted,
+    autoFixExhausted: attempts >= MAX_PIPELINE_ATTEMPTS && safety.level === "fail",
   };
 }
 
@@ -2350,7 +2584,7 @@ export async function generateVaultCode(
     model,
     apiKey,
     userPrompt: prompt,
-    systemPrompt: resolveSystemPrompt(CODEGEN_SYSTEM_PROMPT, prompt),
+    systemPrompt: CODEGEN_SYSTEM_PROMPT,
     stream: false,
   });
 
@@ -2418,7 +2652,7 @@ export async function generateVaultCodeStream(
       model,
       apiKey,
       userPrompt: prompt,
-      systemPrompt: resolveSystemPrompt(STREAM_SYSTEM_PROMPT, prompt),
+      systemPrompt: STREAM_SYSTEM_PROMPT,
       stream: true,
       emit,
     });
@@ -2428,12 +2662,15 @@ export async function generateVaultCodeStream(
     const full: CodegenResult = { ...result, mode: "openai" };
     emit({
       type: "status",
-      phase: full.compiled && full.specAudit.level !== "fail" ? "done" : "error",
+      phase:
+        full.compiled && full.safety.level !== "fail" && (full.integrationTestsPassed || !full.integrationTestPath)
+          ? "done"
+          : "error",
       attempt: full.attempts,
       maxAttempts: MAX_PIPELINE_ATTEMPTS,
       message:
-        full.autoFixExhausted && full.specAudit.level === "fail"
-          ? "Auto-fix exhausted — spec still has FAIL items."
+        full.autoFixExhausted && full.safety.level === "fail"
+          ? "Auto-fix exhausted — safety scanner still blocking."
           : undefined,
     });
     emit({ type: "result", result: full });
@@ -2460,7 +2697,7 @@ export async function generateVaultCodeRefineStream(
   const client = new OpenAI({ apiKey });
 
   const scanPrompt = `${session.initialPrompt}\n${message}`;
-  const refineSystem = resolveSystemPrompt(REFINE_STREAM_SYSTEM_PROMPT, scanPrompt);
+  const refineSystem = REFINE_STREAM_SYSTEM_PROMPT;
   const seedMessages = buildRefineSeedMessages(session, message, refineSystem);
 
   try {
@@ -2483,12 +2720,15 @@ export async function generateVaultCodeRefineStream(
     const full: CodegenResult = { ...result, mode: "openai" };
     emit({
       type: "status",
-      phase: full.compiled && full.specAudit.level !== "fail" ? "done" : "error",
+      phase:
+        full.compiled && full.safety.level !== "fail" && (full.integrationTestsPassed || !full.integrationTestPath)
+          ? "done"
+          : "error",
       attempt: full.attempts,
       maxAttempts: MAX_PIPELINE_ATTEMPTS,
       message:
-        full.autoFixExhausted && full.specAudit.level === "fail"
-          ? "Auto-fix exhausted — spec still has FAIL items."
+        full.autoFixExhausted && full.safety.level === "fail"
+          ? "Auto-fix exhausted — safety scanner still blocking."
           : undefined,
     });
     emit({ type: "result", result: full });
@@ -2511,34 +2751,65 @@ Errors:
 ${errors}`;
 }
 
-function safetyFixPrompt(blocking: SafetyFinding[]): string {
-  const list = blocking.map((f) => `- [${f.rule}] ${f.detail}`).join("\n");
+function buildFailureMemoryJson(
+  vaultPlan: VaultPlan,
+  attempt: number,
+  previousFailures: string[],
+  currentlyBlocking: { id: string; reason: string; sourceScope?: string }[]
+): string {
+  return JSON.stringify(
+    {
+      attempt,
+      vaultKind: vaultPlan.kind,
+      previousFailures,
+      currentlyBlocking,
+      nonNegotiableInvariants: getVaultKindInvariants(vaultPlan.kind),
+    },
+    null,
+    2
+  );
+}
+
+function safetyFixPrompt(
+  blocking: SafetyFinding[],
+  vaultPlan: VaultPlan,
+  attempt: number,
+  previousFailures: string[]
+): string {
+  const currentlyBlocking = blocking.map((f) => ({
+    id: f.rule,
+    reason: f.detail,
+    sourceScope: f.sourceScope,
+  }));
+  const memory = buildFailureMemoryJson(vaultPlan, attempt, previousFailures, currentlyBlocking);
+  const list = blocking.map((f) => `- [${f.rule}${f.sourceScope ? `/${f.sourceScope}` : ""}] ${f.detail}`).join("\n");
   const missingState = blocking
     .filter((f) => f.rule === "public-state-not-in-uischema")
     .map((f) => f.detail)
     .join("\n");
   const uischemaHint = missingState
-    ? `\nFor public-state-not-in-uischema: add a vaultUISchema view method for EACH variable listed above. Copy an existing view method entry and change name/outputs. Count methods array size correctly.\n${missingState}\n`
+    ? `\nFor public-state-not-in-uischema: add a vaultUISchema view method for EACH variable listed above.\n${missingState}\n`
     : "";
-  return `The contract compiles, but a Flap-spec safety scan found BLOCKING issues that make it unsafe or not production-ready. Fix every one and return the corrected JSON (same shape, no imports/pragma).
+  const repeated = previousFailures.filter((r) => blocking.some((b) => b.rule === r));
+  const repeatNote =
+    repeated.length > 0
+      ? `\nThese rules failed in previous attempts: ${[...new Set(repeated)].join(", ")}. Do not make a superficial edit — change the underlying logic.\n`
+      : "";
+  return `You are repairing a generated ${vaultPlan.kind} vault. Do not rewrite unrelated architecture. But DO re-check the entire vault-kind lifecycle before returning code.
 
-Quality bar reminders:
-- require(cond, unicode"English / 中文") on every revert
-- vaultUISchema: EVERY method needs inputs, outputs, approvals arrays (empty if none)
-- Include view methods for public state (buybackBudget, treasury, etc.)
-- nonReentrant on all payout/swap functions; require(to != address(0)) on recipient payouts
-- Emit events for state changes; no silent try/catch
-- Lottery: no weekly timer on enter(); lastDrawTime = block.timestamp in constructor; MAX_ENTRANTS cap
-- Random outcomes: FlapAIConsumerBase only — never block.prevrandao / drawWinner() with on-chain entropy
-- Wording: "AI-provider selected" / "external AI provider selection" for AI draws — never "secure random" or bare "random" without disclosing provider trust
-- Staking: pendingRewards when totalStaked==0; pendingReward(address) in schema; balance delta on stake; require(amount>0); no auto-pay in stake(); disclose Guardian Rule 009 trust; DO NOT override emergency withdraw with excess-only logic
-- AI lottery: require(jackpot > fee) not >=; claimablePrize + claimPrize() not _sendNative(winner) in _fulfillReasoning
-- AI lottery events: DrawRequested on requestDraw; DrawRefunded on refund; AiModelUpdated on setAiModel
-- AI async: clear lastDrawFee after fulfill; delete drawSnapshot on refund; require(n <= 255) before uint8 cast
-- Survivor/elimination: rebuild entrants from drawSnapshot BEFORE delete drawSnapshot; never if (drawSnapshot.length == 1); count survivors after elimination; hasEntered[winner]=false on final payout
-- enter() nonReentrant; hasEntered reset when round ends
-- BuybackExecuted(uint256 bnbIn, uint256 tokensBought) — name event fields to match emit values
+Do not only patch the visible failing line. Re-evaluate the whole vault kind against all invariants before returning code.
+
+Failure memory:
+${memory}
+${repeatNote}
+Before returning code, verify:
+- all previous blocking findings are fixed
+- no new issue from the same vault-kind checklist is introduced
+- UI schema matches functions/events
+- no forbidden wording remains
 ${uischemaHint}
+Return the corrected JSON (same shape, no imports/pragma).
+
 Blocking issues:
 
 ${list}`;
@@ -2554,55 +2825,65 @@ Errors:
 ${errors}`;
 }
 
-function safetyFixPromptStream(blocking: SafetyFinding[]): string {
-  const list = blocking.map((f) => `- [${f.rule}] ${f.detail}`).join("\n");
-  return `It compiles, but a Flap-spec safety scan found BLOCKING issues. Fix every one and re-output in the SAME plain-text format (CONTRACT_NAME / EXPLANATION / SOLIDITY). No imports/pragma.
-
-Quality bar: unicode bilingual requires; complete vaultUISchema (inputs/outputs/approvals on every method); view methods for public state; nonReentrant on payouts; events on state changes; lottery timing only on requestDraw (not enter); MAX_ENTRANTS <= 255; inherit Rule 009 emergency from base (no excess-only overrides); FlapAIConsumerBase for random picks; staking: balance delta, pendingReward in schema, Guardian trust disclosure; jackpot > fee; claimablePrize pull payment; DrawRequested/DrawRefunded/AiModelUpdated events; AI-provider wording in description.
-
-MANDATORY for AI lottery (_fulfillReasoning must include this before the closing brace):
-        lastDrawFee = 0;
-
-MANDATORY for AI lottery payout (never push-pay in callback):
-        claimablePrize[winner] += prize;
-        emit WinnerPaid(winner, prize);
-   Add claimPrize() external nonReentrant pull payment.
-
-MANDATORY in requestDraw before fee deduct:
-        require(jackpot > fee, unicode"Prize too small after fee / 扣费后奖池太小");
-        emit DrawRequested(pendingRequestId, n, fee);
-
-MANDATORY in _onFlapAIRequestRefunded:
-        emit DrawRefunded(requestId, lastDrawFee);
-
-MANDATORY before uint8(n) in requestDraw:
-        require(n > 0 && n <= type(uint8).max, unicode"Invalid entrant count / 无效参与者数量");
-
-MANDATORY for survivor _fulfillReasoning (order matters):
-        address eliminated = drawSnapshot[choice]; hasEntered[eliminated] = false;
-        delete entrants;
-        for (uint256 i = 0; i < drawSnapshot.length; i++) { if (hasEntered[drawSnapshot[i]]) entrants.push(...); }
-        delete drawSnapshot;  // ONLY after the loop above
-        if (survivors == 1) { hasEntered[winner] = false; pay prize; }
-        NEVER: delete drawSnapshot; for (i < drawSnapshot.length) — length is 0 after delete.
-
-Blocking issues:
-
-${list}`;
+function safetyFixPromptStream(
+  blocking: SafetyFinding[],
+  vaultPlan: VaultPlan,
+  attempt: number,
+  previousFailures: string[]
+): string {
+  return `${safetyFixPrompt(blocking, vaultPlan, attempt, previousFailures)}\n\nRe-output in the SAME plain-text format (CONTRACT_NAME / EXPLANATION / SOLIDITY).`;
 }
 
-function surgicalSafetyFixPrompt(blocking: SafetyFinding[], repeatedMessage: string): string {
-  const list = blocking.map((f) => `- [${f.rule}] ${f.detail}`).join("\n");
-  return `You have failed to fix the same blocking issue ${MAX_PIPELINE_ATTEMPTS > 3 ? "3+" : "multiple"} times: "${repeatedMessage}".
+function testFixPrompt(
+  errors: string,
+  vaultPlan: VaultPlan,
+  attempt: number,
+  previousFailures: string[]
+): string {
+  const memory = buildFailureMemoryJson(vaultPlan, attempt, previousFailures, [
+    { id: "integration-test-failure", reason: errors.slice(0, 500) },
+  ]);
+  return `Foundry integration/invariant tests failed for this ${vaultPlan.kind} vault. Fix the vault logic (not the test file) and return corrected JSON (same shape, no imports/pragma).
 
-Re-output the FULL contract in plain-text format (CONTRACT_NAME / EXPLANATION / SOLIDITY). Do not skip any function.
+Failure memory:
+${memory}
+
+Do not only patch the visible failing line. Re-evaluate the entire ${vaultPlan.kind} lifecycle against all invariants.
+
+Test errors:
+${errors.slice(0, 3000)}`;
+}
+
+function testFixPromptStream(
+  errors: string,
+  vaultPlan: VaultPlan,
+  attempt: number,
+  previousFailures: string[]
+): string {
+  return `${testFixPrompt(errors, vaultPlan, attempt, previousFailures)}\n\nRe-output in the SAME plain-text format (CONTRACT_NAME / EXPLANATION / SOLIDITY).`;
+}
+
+function surgicalSafetyFixPrompt(
+  blocking: SafetyFinding[],
+  repeatedMessage: string,
+  vaultPlan: VaultPlan
+): string {
+  const list = blocking.map((f) => `- [${f.rule}] ${f.detail}`).join("\n");
+  const invariants = getVaultKindInvariants(vaultPlan.kind).map((i) => `- ${i}`).join("\n");
+  return `You have failed to fix the same blocking issue multiple times: "${repeatedMessage}".
+
+Vault kind: ${vaultPlan.kind}. This rule has failed in previous attempts. Do not make a superficial edit. Change the underlying logic.
+
+Re-output the FULL contract in plain-text format (CONTRACT_NAME / EXPLANATION / SOLIDITY). Re-check ALL invariants:
+${invariants}
 
 Apply these exact fixes if relevant:
 1. Inside _fulfillReasoning, after crediting claimablePrize and clearing entrants/drawSnapshot, add: lastDrawFee = 0;
 2. Inside requestDraw, use require(jackpot > fee) not >=; before uint8(n): require(n > 0 && n <= type(uint8).max, ...); emit DrawRequested after p.reason
 3. _onFlapAIRequestRefunded must: emit DrawRefunded(requestId, lastDrawFee); pendingRequestId = 0; jackpot += lastDrawFee; lastDrawFee = 0; delete drawSnapshot;
 4. Use claimablePrize[winner] += prize and claimPrize() — never _sendNative(winner) in _fulfillReasoning
-5. Survivor _fulfillReasoning: loop drawSnapshot to rebuild entrants BEFORE delete drawSnapshot; use survivors == 1 not drawSnapshot.length == 1; hasEntered[winner] = false on final win.
+5. Staking: claim or preserve pending BEFORE user.amount +=; pendingReward must match claimReward accounting
+6. Survivor _fulfillReasoning: loop drawSnapshot to rebuild entrants BEFORE delete drawSnapshot; use survivors == 1 not drawSnapshot.length == 1
 
 Blocking issues still present:
 
@@ -2646,7 +2927,8 @@ function stubResult(prompt: string): CodegenResult {
     }
 }`;
   const contractName = "GeneratedVault";
-  const safety = scanSafety(body, contractName);
+  const vaultPlan = inferVaultPlanFromPrompt(prompt);
+  const safety = scanSafety(body, contractName, prompt, { vaultPlan });
   return {
     contractName,
     explanation: `Stub for "${prompt.slice(0, 80)}" — set OPENAI_API_KEY for real AI codegen.`,
@@ -2660,10 +2942,12 @@ function stubResult(prompt: string): CodegenResult {
       items: [],
       mode: "skipped",
     },
+    vaultPlan,
     abi: null,
     bytecodeSize: null,
     attempts: 0,
     integrationTestPath: null,
+    integrationTestsPassed: false,
     fixLog: [],
     autoFixExhausted: false,
     mode: "stub",
