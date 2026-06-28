@@ -4,7 +4,7 @@ import { useAccount, useConnect, useDisconnect, useChainId, useSwitchChain } fro
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
 import { cn } from "../lib/utils";
-import { SUPPORTED_CHAINS } from "../lib/wagmi";
+import { SUPPORTED_CHAINS, hasMetaMaskProvider } from "../lib/wagmi";
 
 function truncateAddress(address: string) {
   return `${address.slice(0, 6)}…${address.slice(-4)}`;
@@ -19,9 +19,18 @@ export default function MetaMaskConnect() {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
-  const metaMask = connectors[0];
+  const metaMaskConnector = connectors.find((c) => c.id === "metaMask" || c.name === "MetaMask");
   const activeChain = SUPPORTED_CHAINS.find((c) => c.id === chainId);
   const busy = isConnecting || isPending || isSwitching;
+  const metaMaskInstalled = hasMetaMaskProvider();
+
+  const onConnect = () => {
+    if (!metaMaskInstalled) {
+      window.open("https://metamask.io/download/", "_blank", "noopener,noreferrer");
+      return;
+    }
+    if (metaMaskConnector) connect({ connector: metaMaskConnector });
+  };
 
   useEffect(() => {
     const onDocClick = (e: MouseEvent) => {
@@ -37,10 +46,10 @@ export default function MetaMaskConnect() {
         <Button
           variant="outline"
           size="sm"
-          disabled={busy || !metaMask}
-          onClick={() => metaMask && connect({ connector: metaMask })}
+          disabled={busy}
+          onClick={onConnect}
         >
-          {busy ? "Connecting…" : "Connect MetaMask"}
+          {busy ? "Connecting…" : metaMaskInstalled ? "Connect MetaMask" : "Install MetaMask"}
         </Button>
         {connectError && (
           <p className="max-w-xs text-right text-xs text-destructive">

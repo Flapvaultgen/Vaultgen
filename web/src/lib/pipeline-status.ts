@@ -1,6 +1,8 @@
 import type { FixLogEntry } from "./codegen";
 
 export const MAX_PIPELINE_ATTEMPTS = 12;
+export const MAX_TEST_FIX_ATTEMPTS = 8;
+export const MAX_TOTAL_PIPELINE_ATTEMPTS = MAX_PIPELINE_ATTEMPTS + MAX_TEST_FIX_ATTEMPTS;
 
 export type PipelinePhase =
   | "idle"

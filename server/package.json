@@ -6,7 +6,7 @@
     "dev": "tsx watch index.ts",
     "build": "tsc --noEmit",
     "start": "tsx index.ts",
-    "test:scanners": "tsx scanner-selfcheck.mts"
+    "test:scanners": "tsx scanner-selfcheck.mts && tsx mechanic-completeness-selfcheck.mts"
   },
   "dependencies": {
     "cors": "^2.8.5",

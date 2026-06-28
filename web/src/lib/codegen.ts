@@ -51,6 +51,7 @@ export type CodegenResult = {
   specAudit: SpecAuditResult;
   vaultPlan: VaultPlan;
   abi: unknown[] | null;
+  creationBytecode: string | null;
   bytecodeSize: number | null;
   attempts: number;
   integrationTestPath: string | null;

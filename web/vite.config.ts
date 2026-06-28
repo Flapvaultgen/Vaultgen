@@ -4,6 +4,12 @@ import path from "node:path";
 
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    dedupe: ["wagmi", "viem"],
+  },
+  optimizeDeps: {
+    include: ["wagmi", "wagmi/connectors"],
+  },
   server: {
     port: 5173,
     fs: {

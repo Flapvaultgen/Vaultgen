@@ -223,6 +223,84 @@ const cases: Case[] = [
     expectRules: ["ai-lottery-push-payout", "vault-logic"],
   },
   {
+    name: "bad-weekly-prize-half-buyback",
+    prompt: "50/50 buyback and burn weekly prize lottery hold 500 tokens",
+    code: `contract TestVault is CodegenVaultBase, FlapAIConsumerBase {
+    constructor(address a, address b, address c) CodegenVaultBase(a, b, c) {}
+    uint256 public constant MINIMUM_HOLDING = 500 * 1e18;
+    uint256 public prizePotAmount;
+    uint256 public lastDrawTime;
+    uint256 public pendingRequestId;
+    uint256 public aiModelId;
+    address[] public entrantList;
+    address[] private drawSnapshot;
+    mapping(address => bool) public hasEntered;
+    mapping(address => uint256) public claimablePrize;
+    event PrizeCollected(address indexed winner, uint256 amount);
+    event NoEntrants(uint256 prizePotAmount);
+    event DrawRequested(uint256 indexed requestId, uint256 entrantCount, uint256 fee);
+    event DrawRefunded(uint256 indexed requestId, uint256 fee);
+    receive() external payable {
+        if (msg.value == 0) return;
+        uint256 half = msg.value / 2;
+        prizePotAmount += half;
+    }
+    function enter() external nonReentrant {
+        require(!hasEntered[msg.sender], unicode"x / x");
+        hasEntered[msg.sender] = true;
+        entrantList.push(msg.sender);
+    }
+    function requestDraw() external onlyManager nonReentrant {
+        require(pendingRequestId == 0, unicode"x / x");
+        require(block.timestamp >= lastDrawTime + 1 weeks, unicode"x / x");
+        if (entrantList.length == 0) { emit NoEntrants(prizePotAmount); return; }
+        delete drawSnapshot;
+        for (uint256 i = 0; i < entrantList.length; i++) drawSnapshot.push(entrantList[i]);
+        uint256 fee = 1;
+        require(prizePotAmount > fee, unicode"x / x");
+        prizePotAmount -= fee;
+        pendingRequestId = 1;
+        emit DrawRequested(1, drawSnapshot.length, fee);
+    }
+    function _fulfillReasoning(uint256 requestId, uint8 choice) internal override {
+        require(requestId == pendingRequestId, unicode"x / x");
+        pendingRequestId = 0;
+        address winner = drawSnapshot[choice];
+        uint256 prize = prizePotAmount; prizePotAmount = 0;
+        claimablePrize[winner] += prize;
+        emit PrizeCollected(winner, prize);
+    }
+    function _onFlapAIRequestRefunded(uint256 requestId) internal override {
+        if (requestId == pendingRequestId) {
+            emit DrawRefunded(requestId, 0);
+            pendingRequestId = 0;
+            delete drawSnapshot;
+        }
+    }
+    function claimPrize() external nonReentrant {}
+    function lastRequestId() public view override returns (uint256) { return pendingRequestId; }
+    function description() public view override returns (string memory) {
+        return unicode"Weekly prize vault with buyback and burn. Hold 500+ tokens. / 每周奖池回购销毁";
+    }
+    function vaultUISchema() public pure override returns (VaultUISchema memory s) {
+        s.vaultType = "T";
+        s.description = unicode"Weekly prize vault with buyback and burn / 每周奖池回购销毁";
+        s.methods = new VaultMethodSchema[](0);
+    }
+}`,
+    expectRules: [
+      "buyback-split-not-implemented",
+      "lottery-no-entrant-cap",
+      "lottery-refund-no-restore",
+      "ai-draw-fee-not-tracked",
+      "pull-prize-event-in-fulfill",
+      "lottery-no-entrants-spam",
+      "ai-lottery-no-provider-disclosure",
+      "ai-lottery-guardian-undisclosed",
+      "vault-logic",
+    ],
+  },
+  {
     name: "bad-prevrandao-winner",
     prompt: "weekly lottery",
     code: `${BASE}
@@ -322,6 +400,36 @@ const cases: Case[] = [
     }
 }`,
     expectRules: ["pendingreward-claim-mismatch", "vault-logic"],
+  },
+  {
+    name: "bad-milestone-half-reward",
+    prompt: "milestone burn vault register interest claim reward",
+    code: `${BASE}
+    uint256 public buybackBudget; uint256 public milestonePool; uint256 public milestoneIndex;
+    uint256[] public milestoneTargets = [0.1 ether, 0.25 ether];
+    mapping(address => uint256) public claimableRewards;
+    mapping(uint256 => mapping(address => bool)) public registeredInterest;
+    receive() external payable { buybackBudget += (msg.value * 60) / 100; milestonePool += msg.value - (msg.value * 60) / 100; }
+    function registerInterest() external {
+        registeredInterest[milestoneIndex][msg.sender] = true;
+    }
+    function advanceMilestone() external onlyManager {
+        milestonePool = 0;
+        milestoneIndex++;
+        _buyAndBurn(buybackBudget, 0);
+        buybackBudget = 0;
+    }
+    function claimReward() external nonReentrant {
+        uint256 r = claimableRewards[msg.sender];
+        require(r > 0, unicode"x / x");
+        claimableRewards[msg.sender] = 0;
+        _sendNative(msg.sender, r);
+    }
+    function currentMilestoneTarget() public view returns (uint256) { return milestoneTargets[milestoneIndex]; }
+    function description() public view override returns (string memory) { return unicode"Guardian Rule 009 / 应急"; }
+    function vaultUISchema() public pure override returns (VaultUISchema memory s) { s.vaultType = "T"; s.description = "d"; s.methods = new VaultMethodSchema[](0); }
+}`,
+    expectRules: ["claim-mapping-never-credited", "register-never-consumed", "half-implemented-reward-vault"],
   },
   {
     name: "good-rewardpool-pattern",

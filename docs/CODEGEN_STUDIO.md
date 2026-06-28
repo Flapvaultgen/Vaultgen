@@ -6,9 +6,9 @@ Right now, launching a custom vault on Flap requires a lot of coding skills. You
 
 **Flap Vault Gen fixes the front half.**
 
-Describe the mechanic in plain English. It turns that into Solidity using Flap’s base contracts, compiles it with Foundry, catches compile and safety issues, runs the 9-rule Flap pre-audit, then lets you keep refining in chat.
+Describe the mechanic in plain English. It turns that into Solidity using Flap’s base contracts, compiles it with Foundry, runs static + behavioral checks, and shows an **advisory** 9-rule Flap pre-audit — then lets you keep refining in chat.
 
-This isn’t “AI wrote a contract.” It’s **AI, Foundry, Flap rule scanners, and the spec corpus running in one loop.**
+This isn’t “AI wrote a contract.” It’s **classify → design → AI draft → Foundry compile → dual safety scan → forge test → advisory audit** in one loop.
 
 The output deploys through **`CodegenVaultFactory`**. Testnet first. Mainnet still needs a real audit.
 
@@ -18,16 +18,20 @@ The output deploys through **`CodegenVaultFactory`**. Testnet first. Mainnet sti
 
 The studio is not a one-shot chat completion. Each pass runs this pipeline:
 
-1. **Draft** — AI writes a full vault contract (inherits `CodegenVaultBase`, uses Flap V2 tax/oracle helpers).
-2. **Compile** — **Foundry** runs `forge build` with **solc 0.8.26** against real Flap interfaces. Failures go back to AI with compiler output.
-3. **Safety scan** — Static blockers: cheap `receive()`, no block randomness for winners, named buckets (not `address(this).balance`), no `selfdestruct` / `delegatecall`, required `description()` + `vaultUISchema()`, and more.
-4. **Logic scan** — Mechanic-specific checks for lotteries, survivor games, staking accrual, oracle callbacks, etc.
-5. **Fix loop** — If compile, safety, or spec checks fail, AI rewrites with a targeted fix prompt (you see pass count and reason in the progress panel).
-6. **Integration test** — AI writes a **mainnet-fork Foundry test** scaffold (Flap Rule **006**).
-7. **Flap pre-audit** — Verifier reads the **9 official spec rules** (001–009) and returns pass / warn / fail per rule.
-8. **Chat refine** — Follow-up messages run the same loop on your existing vault.
+1. **Classify** — AI outputs a `VaultPlan` JSON (kind: staking / lottery / survivor / buyback / hybrid, buckets, required views/events). Regex fallback if no API key.
+2. **Mechanic design** (novel prompts) — For milestones, register+claim, tiers, etc., a second cheap JSON step defines the **lifecycle contract** (who gets credited, when, which UI methods are required). Pure burn vs user-rewards mode is chosen upfront.
+3. **Draft** — AI writes a full vault contract (inherits `CodegenVaultBase`, uses Flap V2 tax/oracle helpers). The prompt includes VaultPlan invariants.
+4. **Compile** — **Foundry** runs `forge build` with **solc 0.8.26** against real Flap interfaces. Failures go back to AI with compiler output.
+5. **Dual safety scan** — Static blockers on **child source + full injected source** (includes inherited Rule 009 emergency from `CodegenVaultBase`):
+   - Cheap `receive()`, no block randomness for winners, named buckets, bilingual requires, UI schema completeness
+   - Mechanic-specific logic (lottery snapshots, staking accrual, survivor elimination, …)
+   - **Mechanic completeness** (novel vaults): dead `claimReward()` paths, `register*` never consumed, missing `registerInterest` in UI schema, unbounded `milestoneIndex`, pool zeroed without payout
+6. **Fix loop** — Structured **failure memory** (previous rule IDs + vault-kind checklist) on each retry. Up to 12 passes for compile / safety / test failures.
+7. **Integration test** — AI writes a **mainnet-fork Foundry test** scaffold (Flap Rule **006**), then the pipeline **runs `forge test --fork-url`** on it when RPC is available (`SKIP_FORK_TESTS=1` skips).
+8. **Flap pre-audit (advisory)** — Verifier reads the **9 official spec rules** (001–009) and returns pass / warn / fail per rule. LLM FAIL items are **downgraded to warnings** — they inform you but do **not** block deploy-ready. **Deterministic scanners + passing fork tests** are the gate.
+9. **Chat refine** — Follow-up messages run the same loop on your existing vault.
 
-When the panel shows **Deploy ready**, you have compiled bytecode that cleared automated checks — good for **testnet**. Mainnet still needs human review and a third-party audit.
+When the panel shows **Deploy ready**, you have compiled bytecode that cleared **safety scanners + integration tests** — good for **testnet**. Read the advisory pre-audit panel yourself; mainnet still needs human review and a third-party audit.
 
 ---
 
@@ -83,9 +87,9 @@ When generation finishes, you will see:
 | Panel | What it means for you |
 |-------|------------------------|
 | **Compiled** | Solidity built successfully with the real Flap compiler |
-| **Safety** | **pass** = no serious issues found · **review** = warnings worth reading · **blocked** = must fix before testnet |
-| **Flap pre-audit** | Checked against Flap’s official vault rules (fund flow, fairness, UI compatibility, etc.) |
-| **Deploy ready** | Green only when compile + safety + audit are all clear enough for testnet |
+| **Safety** | **pass** = no blocking scanner issues · **review** = warnings worth reading · **blocked** = must fix before testnet |
+| **Flap pre-audit** | **Advisory** — 9-rule LLM review (fund flow, fairness, UI, …). WARN/FAIL here guides human review; it does not alone block deploy. |
+| **Deploy ready** | Green when **compile + safety pass + fork tests pass** (if tests ran). Not a guarantee of novel-mechanic correctness — read the code. |
 
 The timeline shows what the studio did for you — writing code, fixing compile errors, running checks — so you do not have to do that by hand.
 
@@ -114,6 +118,12 @@ Each message updates the same vault (it does not start from scratch unless you c
 - *“Pay everyone by current token balance”* — that is gameable; ask for **staking + rewards** instead
 - *“Do the buyback inside receive()”* — tax arrives in `receive()`; buyback must be a separate manager action
 - *“List all token holders on-chain”* — impossible; use a **keeper list** or **stake to participate**
+- *“Register interest AND claim rewards”* without saying **how rewards are credited** — either ask for **pure milestone burn** (no claim) or specify **register → advance → credit claimable → claim**
+
+**Novel mechanics (milestones, tiers, campaigns):**
+- Say whether users **only track eligibility** or **actually receive rewards**
+- If users claim, say **when** balances are credited (e.g. on `advanceMilestone`, not only in `claimReward`)
+- List every **user-facing function** you want in the Flap UI (`registerInterest`, `claimReward`, …)
 
 ---
 
@@ -145,14 +155,18 @@ You do not need to memorize Flap’s spec. Behind the scenes the studio enforces
 - Lotteries cap entrants (gas safety) and reset entry flags between rounds
 - Random outcomes use the **Flap AI oracle**, not block entropy
 - Staking rewards use proper **accrual math**, not live wallet balance
+- **No half-implemented paths**: `claimReward()` must have a credit source; `register*()` must connect to advance/distribute or be removed
+- **Full-source scan** catches inherited Rule 009 emergency behavior on staking vaults (disclosure required)
 
-If something fails, the studio **retries and fixes** on its own (compile errors, safety blocks, many audit issues) before showing you the result.
+If something fails, the studio **retries and fixes** on its own (compile errors, safety blocks, fork test failures) before showing you the result.
 
 ---
 
 ## Deploy ready vs mainnet ready
 
-**Deploy ready (green in the studio)** means the vault **compiled** and passed automated safety + spec checks well enough for **testnet experiments**.
+**Deploy ready (green in the studio)** means the vault **compiled**, passed **blocking safety scanners**, and **fork integration tests** (when RPC available).
+
+The **Flap pre-audit panel is advisory** — treat WARN/FAIL items as a human checklist, not an automatic pass/fail gate.
 
 Before **mainnet** and real holder funds:
 

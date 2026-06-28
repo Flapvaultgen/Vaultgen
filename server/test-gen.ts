@@ -234,8 +234,26 @@ export async function runIntegrationTests(
     if (/connection refused|timeout|ENOTFOUND|could not instantiate fork/i.test(out)) {
       return { ok: true, errors: out, skipped: true };
     }
-    return { ok: false, errors: out };
+    if (/not allowed to be accessed for read operations|fs_permissions/i.test(out)) {
+      return {
+        ok: false,
+        errors: `Foundry fs_permissions: allow read on test/_codegen/ in foundry.toml (not a vault logic bug).\n${summarizeForgeTestOutput(out)}`,
+      };
+    }
+    return { ok: false, errors: summarizeForgeTestOutput(out) };
   }
+}
+
+/** Pull the actionable FAIL line out of noisy forge output for fix prompts + UI. */
+export function summarizeForgeTestOutput(out: string): string {
+  const failLines = out
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => /^\[FAIL:|^Failing tests:|^Encountered .* failing test|AssertionError|revert:/i.test(l));
+  if (failLines.length > 0) return failLines.slice(0, 5).join("\n");
+  const suite = out.match(/Suite result: FAILED[^\n]*/)?.[0];
+  if (suite) return suite;
+  return out.slice(0, 800);
 }
 
 function invariantPromptForKind(vaultPlan?: VaultPlan): string {

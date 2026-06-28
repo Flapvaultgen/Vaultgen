@@ -1,6 +1,10 @@
 {
   "factoryAddress": "",
+  "sandboxDeployer": "",
   "productName": "Flap Vault Gen",
   "flapLaunch": "https://flap.sh/launch",
+  "flapTestnet": "https://testnet.flap.sh",
+  "bscTestnetExplorer": "https://testnet.bscscan.com",
+  "bscTestnetFaucet": "https://drip.tools",
   "apiUrl": ""
 }

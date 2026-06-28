@@ -8,6 +8,15 @@ export type VaultKind =
   | "treasury"
   | "hybrid";
 
+export type MechanicDesign = {
+  mode: "pure_accounting" | "user_rewards" | "registration_only" | "manager_only";
+  userActions: string[];
+  creditPaths: string[];
+  consumptionPaths: string[];
+  requiredSchemaMethods: string[];
+  lifecycleNotes: string[];
+};
+
 export type VaultPlan = {
   kind: VaultKind;
   usesNativeRewards: boolean;
@@ -24,6 +33,7 @@ export type VaultPlan = {
   stateVariables: string[];
   payoutMode: string;
   riskDisclosure: string[];
+  mechanicDesign?: MechanicDesign;
 };
 
 const DEFAULT_PLAN: VaultPlan = {
@@ -79,8 +89,18 @@ const KIND_INVARIANTS: Record<VaultKind, string[]> = {
   hybrid: [
     "Satisfy ALL applicable mechanic invariants from the combined design",
     "Keep receive() cheap — bucket accounting only",
+    "Every user-facing function must have a complete lifecycle — no dead register/claim paths",
   ],
 };
+
+const NOVEL_MECHANIC_INVARIANTS = [
+  "If you expose register*() AND claim*(), advance/distribute MUST credit claimableRewards[user] += share OR remove unused paths",
+  "If claimableRewards/claimablePrize mapping exists, some function MUST do mapping[user] += amount before claim reads it",
+  "If register*() sets flags, advance/distribute MUST read those flags or a registrant address[] and loop payouts",
+  "milestoneIndex + milestoneTargets[] MUST use require(milestoneIndex < milestoneTargets.length) before indexing",
+  "Every external user write (register, claim, stake, enter) MUST appear in vaultUISchema.methods",
+  "Do NOT zero milestonePool/rewardPool on advance unless rewards are distributed or vault is pure burn-only (no claim)",
+];
 
 export function getVaultKindInvariants(kind: VaultKind): string[] {
   return KIND_INVARIANTS[kind] ?? KIND_INVARIANTS.treasury;
@@ -92,12 +112,14 @@ export function inferVaultPlanFromPrompt(prompt: string): VaultPlan {
   const isStake = /stake|dividend|earn reward|staking/.test(p);
   const isSurvivor = /survivor|eliminat/.test(p);
   const isLottery = /lottery|raffle|jackpot|burn lottery|weekly draw/.test(p);
-  const isBuyback = /buyback|buy.?back|burn tax/.test(p);
+  const isBuyback = /buyback|buy.?back|burn tax|milestone burn/.test(p);
+  const isMilestone = /milestone|threshold|tier|epoch target/.test(p);
   const kinds: VaultKind[] = [];
   if (isStake) kinds.push("staking_rewards");
   if (isSurvivor) kinds.push("survivor_elimination");
   if (isLottery) kinds.push("ai_lottery");
   if (isBuyback) kinds.push("buyback");
+  if (isMilestone && !isStake && !isLottery) kinds.push("buyback");
   const kind: VaultKind =
     kinds.length > 1 ? "hybrid" : kinds[0] ?? (/treasury|split|bucket/.test(p) ? "treasury" : "treasury");
 
@@ -117,8 +139,8 @@ export function inferVaultPlanFromPrompt(prompt: string): VaultPlan {
       ? ["undistributedRewards"]
       : isLottery
         ? ["jackpot", "buybackBudget"]
-        : isBuyback
-          ? ["buybackBudget", "treasury"]
+        : isBuyback || isMilestone
+          ? ["buybackBudget", "milestonePool", "treasury"]
           : ["treasury"],
     tokenCustodyBuckets: usesStaking ? ["staked taxToken"] : [],
     requiredPublicViews: usesStaking
@@ -146,11 +168,20 @@ export function inferVaultPlanFromPrompt(prompt: string): VaultPlan {
 }
 
 export function buildVaultPlanPromptAppendix(plan: VaultPlan): string {
-  const invariants = getVaultKindInvariants(plan.kind);
+  const invariants = [
+    ...getVaultKindInvariants(plan.kind),
+    ...(plan.mechanicDesign || plan.kind === "hybrid" ? NOVEL_MECHANIC_INVARIANTS : []),
+  ];
+  const designBlock = plan.mechanicDesign
+    ? `
+MECHANIC DESIGN (commit before writing Solidity — every path must be wired):
+${JSON.stringify(plan.mechanicDesign, null, 2)}
+`
+    : "";
   return `
 VAULT PLAN (mandatory — you are generating kind: ${plan.kind}):
-${JSON.stringify(plan, null, 2)}
-
+${JSON.stringify({ ...plan, mechanicDesign: plan.mechanicDesign ?? undefined }, null, 2)}
+${designBlock}
 NON-NEGOTIABLE INVARIANTS for ${plan.kind}:
 ${invariants.map((i) => `- ${i}`).join("\n")}
 
@@ -161,7 +192,84 @@ Payout mode: ${plan.payoutMode}
 Risk disclosures: ${plan.riskDisclosure.join("; ")}
 
 Before returning code, verify the entire ${plan.kind} lifecycle against ALL invariants above.
+If mode is pure_accounting: do NOT add register/claim unless they do something real.
+If mode is user_rewards: every claim mapping MUST be credited in advance/distribute.
 `;
+}
+
+export { isNovelMechanicPrompt } from "./mechanic-completeness.js";
+
+/** Expand novel/hybrid prompts into an explicit lifecycle contract before codegen. */
+export async function expandMechanicDesign(
+  prompt: string,
+  plan: VaultPlan,
+  apiKey: string | undefined,
+  model: string
+): Promise<VaultPlan> {
+  const { isNovelMechanicPrompt } = await import("./mechanic-completeness.js");
+  if (!isNovelMechanicPrompt(prompt) && plan.kind !== "hybrid") return plan;
+
+  const fallback: MechanicDesign = {
+    mode: /\bclaim\b|\breward\b/i.test(prompt) ? "user_rewards" : "pure_accounting",
+    userActions: [],
+    creditPaths: /\bclaim\b/i.test(prompt) ? ["claimableRewards[user] += in advance/distribute"] : [],
+    consumptionPaths: /\bregister\b/i.test(prompt) ? ["registeredInterest read in advanceMilestone"] : [],
+    requiredSchemaMethods: [],
+    lifecycleNotes: [
+      "Either implement full register -> advance -> credit -> claim, or remove dead user actions",
+    ],
+  };
+
+  if (!apiKey) return { ...plan, mechanicDesign: fallback };
+
+  try {
+    const { default: OpenAI } = await import("openai");
+    const client = new OpenAI({ apiKey });
+    const completion = await client.chat.completions.create({
+      model,
+      temperature: 0.1,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `Design a complete mechanic lifecycle for a Flap tax vault BEFORE Solidity is written.
+Return JSON:
+{
+  "mode": "pure_accounting|user_rewards|registration_only|manager_only",
+  "userActions": ["registerInterest", "claimReward", ...],
+  "creditPaths": ["where claimableRewards gets += ..."],
+  "consumptionPaths": ["where registration flags/arrays are read ..."],
+  "requiredSchemaMethods": ["every user external write + key views"],
+  "lifecycleNotes": ["plain English wiring rules"]
+}
+
+Rules:
+- pure_accounting: milestone burn only — NO register/claim unless purely informational with no claimReward
+- user_rewards: register MUST connect to advance/distribute which MUST credit claimable* before claim
+- If prompt says "eligibility only" / "no payout" -> registration_only, no claimReward
+- List every function the UI must expose in requiredSchemaMethods`,
+        },
+        { role: "user", content: `Vault plan kind: ${plan.kind}\nPrompt:\n${prompt}` },
+      ],
+    });
+    const raw = completion.choices[0]?.message?.content;
+    if (!raw) return { ...plan, mechanicDesign: fallback };
+    const d = JSON.parse(raw) as Partial<MechanicDesign>;
+    return {
+      ...plan,
+      kind: plan.kind === "treasury" && isNovelMechanicPrompt(prompt) ? "hybrid" : plan.kind,
+      mechanicDesign: {
+        mode: (d.mode as MechanicDesign["mode"]) ?? fallback.mode,
+        userActions: Array.isArray(d.userActions) ? d.userActions : fallback.userActions,
+        creditPaths: Array.isArray(d.creditPaths) ? d.creditPaths : fallback.creditPaths,
+        consumptionPaths: Array.isArray(d.consumptionPaths) ? d.consumptionPaths : fallback.consumptionPaths,
+        requiredSchemaMethods: Array.isArray(d.requiredSchemaMethods) ? d.requiredSchemaMethods : fallback.requiredSchemaMethods,
+        lifecycleNotes: Array.isArray(d.lifecycleNotes) ? d.lifecycleNotes : fallback.lifecycleNotes,
+      },
+    };
+  } catch {
+    return { ...plan, mechanicDesign: fallback };
+  }
 }
 
 export async function classifyVaultPlan(

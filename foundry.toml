@@ -5,6 +5,8 @@ libs = ["lib"]
 evm_version = "cancun"
 solc_version = "0.8.26"
 optimizer = true
-optimizer_runs = 99999 
+optimizer_runs = 99999
+# Codegen integration tests load creation bytecode from test/_codegen/*.bin
+fs_permissions = [{ access = "read", path = "./test/_codegen/" }]
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

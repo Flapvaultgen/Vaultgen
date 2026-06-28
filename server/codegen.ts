@@ -8,6 +8,7 @@ import { runSpecAudit, type SpecAuditResult } from "./spec-audit.js";
 import { generateIntegrationTest, runIntegrationTests } from "./test-gen.js";
 import {
   classifyVaultPlan,
+  expandMechanicDesign,
   buildVaultPlanPromptAppendix,
   getVaultKindInvariants,
   inferVaultPlanFromPrompt,
@@ -15,6 +16,7 @@ import {
   isLotteryPlan,
   type VaultPlan,
 } from "./vault-plan.js";
+import { scanMechanicCompleteness } from "./mechanic-completeness.js";
 
 const execAsync = promisify(exec);
 
@@ -68,6 +70,7 @@ export type CodegenResult = {
   specAudit: SpecAuditResult;
   vaultPlan: VaultPlan;
   abi: unknown[] | null;
+  creationBytecode: string | null;
   bytecodeSize: number | null;
   attempts: number;
   integrationTestPath: string | null;
@@ -78,6 +81,8 @@ export type CodegenResult = {
 };
 
 const MAX_PIPELINE_ATTEMPTS = 12;
+const MAX_TEST_FIX_ATTEMPTS = 8;
+const MAX_TOTAL_ATTEMPTS = MAX_PIPELINE_ATTEMPTS + MAX_TEST_FIX_ATTEMPTS;
 
 // ── Injected preamble: imports + an abstract base that supplies all the
 //    error-prone boilerplate so the AI only writes the mechanic. ─────────────
@@ -266,7 +271,11 @@ HARD REQUIREMENTS:
     the raw bool return of transfer/transferFrom.
 13. NEVER emit a stub, placeholder, TODO/FIXME, "implement this later", or a function that returns
     fake/empty data. Every function must be fully and correctly implemented.
-14. If the mechanic needs data that does NOT exist on-chain (e.g. ranking ALL token holders, an
+14. NO HALF-IMPLEMENTED MECHANICS (novel vaults): if you add register*() AND claim*(), advance/distribute
+    MUST credit claimableRewards[user] += share. If milestone-only burn with no user rewards, do NOT add
+    register/claim/claimableRewards at all. Every external user write MUST appear in vaultUISchema.methods.
+    milestoneIndex + milestoneTargets[] MUST bounds-check before indexing.
+15. If the mechanic needs data that does NOT exist on-chain (e.g. ranking ALL token holders, an
     off-chain price, a "top N holders" list — the vault CANNOT enumerate ERC20 holders), do NOT fake
     it. Instead accept it as input to an onlyManager keeper function, e.g.
         function executeAirdrop(address[] calldata winners, uint256[] calldata amounts)
@@ -760,9 +769,141 @@ function replaceFunctionBody(source: string, fnName: string, newBody: string): s
   return source.slice(0, start) + newBody + source.slice(i - 1);
 }
 
-/** Deterministic fixes for patterns the AI often misses after many retries. */
-function applyCommonCodegenPatches(code: string): string {
+function replaceReceiveBody(source: string, newBody: string): string {
+  const m = source.match(/receive\s*\(\s*\)\s*external\s+payable[^{]*\{/);
+  if (!m || m.index === undefined) return source;
+  const start = m.index + m[0].length;
+  let i = start;
+  let depth = 1;
+  for (; i < source.length && depth > 0; i++) {
+    const c = source[i];
+    if (c === "{") depth++;
+    else if (c === "}") depth--;
+  }
+  return source.slice(0, start) + newBody + source.slice(i - 1);
+}
+
+/** Move _buyAndBurn out of receive() into buybackBudget + executeBuyback (Rule 005 / buyback-split). */
+function patchReceiveBuybackBuckets(code: string): string {
+  const recvBody = extractReceiveBody(code);
+  if (!recvBody || !/_buyAndBurn\s*\(|swapExactInput/.test(recvBody)) return code;
+
   let out = code;
+
+  if (!/\bbuybackBudget\b/.test(out)) {
+    const anchor = out.match(/uint256\s+public\s+(weeklyJackpot|totalBurned|currentWeek|jackpot|prizePotAmount)\s*;/);
+    if (anchor) {
+      out = out.replace(anchor[0], `${anchor[0]}\n    uint256 public buybackBudget;`);
+    } else {
+      out = out.replace(/(contract\s+\w+[^{]+\{)/, `$1\n    uint256 public buybackBudget;`);
+    }
+  }
+
+  const jackpotVar = /\bweeklyJackpot\b/.test(out)
+    ? "weeklyJackpot"
+    : /\bprizePotAmount\b/.test(out)
+      ? "prizePotAmount"
+      : /\bjackpot\b/.test(out)
+        ? "jackpot"
+        : "weeklyJackpot";
+
+  const depositLine = /emit\s+Deposit/.test(recvBody) ? "\n        emit Deposit(msg.sender, msg.value);" : "";
+
+  out = replaceReceiveBody(
+    out,
+    `
+        if (msg.value == 0) return;
+        uint256 burnShare = msg.value / 2;
+        uint256 jackpotShare = msg.value - burnShare;
+        buybackBudget += burnShare;
+        ${jackpotVar} += jackpotShare;${depositLine}
+    `
+  );
+
+  if (!/function\s+executeBuyback\s*\(/.test(out)) {
+    const executeFn = `
+    function executeBuyback(uint256 minTokensOut) external onlyManager nonReentrant {
+        require(minTokensOut > 0, unicode"Slippage required / 需要滑点保护");
+        uint256 amt = buybackBudget;
+        require(amt > 0, unicode"No buyback budget / 无回购预算");
+        buybackBudget = 0;
+        totalBurned += _buyAndBurn(amt, minTokensOut);
+        emit Burn(amt);
+    }
+`;
+    if (/function\s+requestDraw\s*\(/.test(out)) {
+      out = out.replace(/(\n\s*function\s+requestDraw\s*\()/, `${executeFn}$1`);
+    } else if (/function\s+enter\s*\(/.test(out)) {
+      const enterChunk = extractFunctionChunks(out).find((f) => f.name === "enter");
+      if (enterChunk) {
+        const end = out.indexOf(enterChunk.header) + enterChunk.header.length + enterChunk.body.length + 1;
+        out = out.slice(0, end) + executeFn + out.slice(end);
+      }
+    } else {
+      out = out.replace(/(\n\s*function\s+setAiModel\s*\()/, `${executeFn}$1`);
+    }
+  }
+
+  return out;
+}
+
+/** Cap lottery entrants at 255 in enter(), not only at draw time. */
+function patchEntrantCap(code: string): string {
+  if (!/function\s+enter\s*\(/.test(code) || !/entrants\.push/.test(code)) return code;
+  if (/MAX_ENTRANTS|entrants\.length\s*<\s*255|entrants\.length\s*<\s*type\s*\(\s*uint8\s*\)\.max/.test(code)) {
+    return code;
+  }
+
+  let out = code;
+  if (!/MAX_ENTRANTS/.test(out)) {
+    const anchor = out.match(/address\[\]\s+(?:public\s+)?entrants\s*;/);
+    if (anchor) {
+      out = out.replace(anchor[0], `${anchor[0]}\n    uint256 public constant MAX_ENTRANTS = 255;`);
+    }
+  }
+
+  const enterBody = findFunctionBody(out, "enter");
+  if (enterBody && !/MAX_ENTRANTS|\.length\s*<\s*255/.test(enterBody)) {
+    out = replaceFunctionBody(
+      out,
+      "enter",
+      `require(entrants.length < MAX_ENTRANTS, unicode"Entrant cap / 参与者已满");\n        ${enterBody.trimStart()}`
+    );
+  }
+  return out;
+}
+
+/** Add nonReentrant to enter() when mutating entrant arrays. */
+function patchEnterNonReentrant(code: string): string {
+  if (!/function\s+enter\s*\(/.test(code) || !/entrants\.push|hasEntered/.test(code)) return code;
+  if (/function\s+enter\s*\([^)]*\)\s*external\s+nonReentrant/.test(code)) return code;
+  return code.replace(/function\s+enter\s*\(\s*\)\s*external(?!\s+nonReentrant)/, "function enter() external nonReentrant");
+}
+
+/** Ensure AI lottery vaults disclose Flap AI provider selection in schema description. */
+function patchAiLotteryDisclosure(code: string): string {
+  if (!/FlapAIConsumerBase/.test(code) || !/function\s+requestDraw\s*\(/.test(code)) return code;
+  const schemaBody = extractVaultUISchemaBody(code);
+  if (!schemaBody) return code;
+  if (/AI.{0,30}provider|AI.{0,20}oracle|AI.{0,20}selected|Flap AI/i.test(schemaBody)) return code;
+  return code.replace(
+    /(schema\.description\s*=\s*unicode"[^"]*)(")/,
+    `$1; winner selected by Flap AI provider (not on-chain VRF)$2`
+  );
+}
+
+function isForgeCompileSuccess(out: string): boolean {
+  return /Compiler run successful/i.test(out);
+}
+
+/** Deterministic fixes for patterns the AI often misses after many retries. */
+export function applyCommonCodegenPatches(code: string): string {
+  let out = code;
+
+  out = patchReceiveBuybackBuckets(out);
+  out = patchEntrantCap(out);
+  out = patchEnterNonReentrant(out);
+  out = patchAiLotteryDisclosure(out);
 
   if (/FlapAIConsumerBase/.test(out) && /lastDrawFee/.test(out)) {
     const fulfillBody = findFunctionBody(out, "_fulfillReasoning");
@@ -810,12 +951,20 @@ function uischemaIncomplete(schemaBody: string): string[] {
 
 function publicStateMissingFromUISchema(source: string, schemaBody: string): string[] {
   const skip = new Set(["taxToken", "creator", "factory"]);
+  const coveredByAlias = (name: string): boolean => {
+    if (name === "pendingRequestId") return /lastRequestId|"requestId"/.test(schemaBody);
+    if (name === "aiModelId") return /setAiModel|"aiModelId"/.test(schemaBody);
+    // Draw cadence/fee bookkeeping — exposed via events and manager flows, not standalone UI views.
+    if (name === "lastDrawFee" || name === "lastDrawTime" || name === "currentWeek") return true;
+    return false;
+  };
   const missing: string[] = [];
   for (const m of source.matchAll(
-    /(?:uint256|uint128|uint64|uint32|uint|bool|address)\s+public\s+(?:(?:constant|immutable)\s+)?(\w+)/g
+    /(?:uint256|uint128|uint64|uint32|uint|bool|address)\s+public\s+(?:(constant|immutable)\s+)?(\w+)/g
   )) {
-    const name = m[1]!;
-    if (skip.has(name)) continue;
+    const isFixed = m[1] === "constant" || m[1] === "immutable";
+    const name = m[2]!;
+    if (isFixed || skip.has(name) || coveredByAlias(name)) continue;
     if (schemaBody.includes(`"${name}"`)) continue;
     const camel = name.charAt(0).toUpperCase() + name.slice(1);
     if (schemaBody.includes(`"get${camel}"`)) continue;
@@ -940,7 +1089,10 @@ export function scanVaultLogic(source: string, userPrompt = "", vaultPlan?: Vaul
     if (/block\.prevrandao|blockhash\s*\(/.test(source) && !/FlapAIConsumerBase/.test(source)) {
       issues.push("Uses block entropy instead of FlapAIConsumerBase");
     }
-    if (/entrants\.push/.test(source) && !/MAX_ENTRANTS|entrants\.length\s*[<>=]+\s*255/.test(source)) {
+    if (
+      /(?:entrants|entrantList)\.push/.test(source) &&
+      !/MAX_ENTRANTS|(?:entrants|entrantList)\.length\s*[<>=]+\s*255/.test(source)
+    ) {
       issues.push("No MAX_ENTRANTS cap at 255");
     }
     if (/FlapAIConsumerBase/.test(source) && /requestDraw|requestElimination/.test(source)) {
@@ -1102,7 +1254,9 @@ export function scanSafety(
   const has = (re: RegExp) => re.test(source);
   const hasBuyback =
     /buybackBudget|executeBuyback|_buyAndBurn/i.test(source) || /buyback/i.test(userPrompt);
-  const hasBuckets = /buybackBudget|treasury|jackpot|rewardPool/i.test(source);
+  const hasBuckets = /buybackBudget|treasury|jackpot|rewardPool|prizePotAmount|survivorPool/i.test(source);
+  const entrantArrayRe = /(?:entrants|entrantList|participantList|entryList)/;
+  const prizeBucketRe = /(?:jackpot|prizePotAmount|survivorPool|rewardPool)/;
   const hasLottery =
     /FlapAIConsumerBase|entrants|_fulfillReasoning|requestDraw/i.test(source) ||
     /lottery|raffle|jackpot/i.test(userPrompt);
@@ -1141,6 +1295,23 @@ export function scanSafety(
     }
     if (/\brequire\s*\(\s*msg\.value/.test(body)) {
       add("warn", "receive-reverts", "receive() can revert on a deposit (require on msg.value). Return early instead so tax dispatch never fails.");
+    }
+    const splitReceive =
+      /msg\.value\s*\/\s*2\b|msg\.value\s*-\s*\w+Share|\bhalf\s*=/.test(body) || /buyback/i.test(body);
+    const mentionsBuyback =
+      /buyback|回购/i.test(userPrompt) ||
+      /buyback|回购/i.test(source.match(/function description[\s\S]*?^\s*\}/m)?.[0] ?? "") ||
+      /buyback|回购/i.test(extractVaultUISchemaBody(source) ?? "");
+    if (splitReceive && mentionsBuyback) {
+      const tracksBuyback = /buybackBudget\s*\+=/.test(body + source);
+      const hasExecute = /function\s+executeBuyback\s*\(/.test(source);
+      if (!tracksBuyback || !hasExecute) {
+        add(
+          "block",
+          "buyback-split-not-implemented",
+          "receive() splits tax for buyback/burn but buybackBudget and executeBuyback() are missing — reserved BNB is untracked until Guardian emergency withdrawal."
+        );
+      }
     }
   }
 
@@ -1294,20 +1465,25 @@ export function scanSafety(
     );
   }
 
-  // Unbounded entrants[] in draw is a gas DoS — cap at MAX_ENTRANTS (<= 255).
+  // Unbounded entrant arrays in draw is a gas DoS — cap at MAX_ENTRANTS (<= 255).
   const drawsFromEntrantList =
     has(/function\s+drawWinner\s*\(/) ||
     has(/requestDraw\s*\(/) ||
-    has(/for\s*\([^)]*entrants\.length/) ||
-    has(/%\s*entrants\.length\b/);
-  if (has(/entrants\.push\s*\(/) && drawsFromEntrantList && (hasLottery || has(/function\s+drawWinner\s*\(/))) {
+    has(new RegExp(`for\\s*\\([^)]*${entrantArrayRe.source}\\.length`)) ||
+    has(new RegExp(`%\\s*${entrantArrayRe.source}\\.length\\b`));
+  if (
+    has(new RegExp(`${entrantArrayRe.source}\\.push\\s*\\(`)) &&
+    drawsFromEntrantList &&
+    (hasLottery || has(/function\s+drawWinner\s*\(/))
+  ) {
     const hasEntrantCap =
-      /MAX_ENTRANTS|maxEntrants|MAX_ENTRANT|entrants\.length\s*[<>=]+\s*255/.test(source);
+      /MAX_ENTRANTS|maxEntrants|MAX_ENTRANT/.test(source) ||
+      new RegExp(`${entrantArrayRe.source}\\.length\\s*[<>=]+\\s*255`).test(source);
     if (!hasEntrantCap) {
       add(
         "block",
         "lottery-no-entrant-cap",
-        "Lottery with entrants.push + draw loop must cap entries: MAX_ENTRANTS <= 255 and require(entrants.length < MAX_ENTRANTS) in enter()."
+        "Lottery with entrantList/entrants.push + draw loop must cap entries: MAX_ENTRANTS <= 255 and require(entrantList.length < MAX_ENTRANTS) in enter()."
       );
     }
   }
@@ -1372,6 +1548,8 @@ export function scanSafety(
   }
 
   const fulfillFn = extractFunctionChunks(source).find((f) => f.name === "_fulfillReasoning");
+  const refundFn = extractFunctionChunks(source).find((f) => f.name === "_onFlapAIRequestRefunded");
+  const reqDrawFn = extractFunctionChunks(source).find((f) => f.name === "requestDraw");
   const survivor = isSurvivorMechanic(source, userPrompt);
   if (fulfillFn && survivor) {
     if (/drawSnapshot\.length\s*==\s*1/.test(fulfillFn.body)) {
@@ -1485,17 +1663,19 @@ export function scanSafety(
     }
   }
 
-  // AI refund should restore fee taken from jackpot bucket.
-  if (
-    has(/_onFlapAIRequestRefunded/) &&
-    has(/jackpot\s*-=\s*fee/) &&
-    !/_onFlapAIRequestRefunded[\s\S]{0,400}jackpot\s*\+=/.test(source)
-  ) {
-    add(
-      "block",
-      "lottery-refund-no-restore",
-      "_onFlapAIRequestRefunded must restore jackpot += fee (and clear pendingRequestId) when the AI oracle refunds a draw fee."
-    );
+  // AI refund should restore fee taken from prize bucket via lastDrawFee.
+  if (has(/_onFlapAIRequestRefunded/) && has(new RegExp(`${prizeBucketRe.source}\\s*-=\\s*fee`))) {
+    const refundBody = refundFn?.body ?? "";
+    const restoresFee =
+      new RegExp(`${prizeBucketRe.source}\\s*\\+=\\s*lastDrawFee`).test(refundBody) ||
+      new RegExp(`${prizeBucketRe.source}\\s*\\+=\\s*fee`).test(refundBody);
+    if (!restoresFee) {
+      add(
+        "block",
+        "lottery-refund-no-restore",
+        "_onFlapAIRequestRefunded must restore prizePotAmount/jackpot += lastDrawFee (and clear pendingRequestId) when the AI oracle refunds a draw fee."
+      );
+    }
   }
 
   // Staking: reward payouts must not use live balanceOf for amounts.
@@ -1646,7 +1826,11 @@ export function scanSafety(
 
   // Bucket accounting: AI fee from balance without bucket decrement.
   if (hasBuckets && has(/\.reason\s*\{/) && has(/address\s*\(\s*this\s*\)\.balance\s*>=/)) {
-    if (!has(/jackpot\s*-=\s*fee|buybackBudget\s*-=\s*fee|treasury\s*-=\s*fee|feeBucket\s*-=/)) {
+    if (
+      !has(
+        /jackpot\s*-=\s*fee|prizePotAmount\s*-=\s*fee|buybackBudget\s*-=\s*fee|treasury\s*-=\s*fee|feeBucket\s*-=/
+      )
+    ) {
       add(
         "block",
         "bucket-balance-desync",
@@ -1815,7 +1999,6 @@ export function scanSafety(
   }
 
   // AI refund must clear stale snapshot.
-  const refundFn = extractFunctionChunks(source).find((f) => f.name === "_onFlapAIRequestRefunded");
   if (refundFn && has(/drawSnapshot/) && !/delete drawSnapshot/.test(refundFn.body)) {
     add(
       "block",
@@ -1918,18 +2101,51 @@ export function scanSafety(
   }
 
   // AI lottery: jackpot >= fee leaves zero prize for winner.
-  const reqDrawFn = extractFunctionChunks(source).find((f) => f.name === "requestDraw");
   if (
     reqDrawFn &&
     has(/FlapAIConsumerBase/) &&
-    /jackpot\s*>=\s*fee/.test(reqDrawFn.body) &&
-    !/jackpot\s*>\s*fee|MIN_PRIZE|minimum prize/i.test(reqDrawFn.body + source)
+    new RegExp(`${prizeBucketRe.source}\\s*>=\\s*fee`).test(reqDrawFn.body) &&
+    !new RegExp(`${prizeBucketRe.source}\\s*>\\s*fee`).test(reqDrawFn.body) &&
+    !/MIN_PRIZE|minimum prize/i.test(reqDrawFn.body + source)
   ) {
     add(
       "block",
       "lottery-jackpot-fee-zero-prize",
-      "require(jackpot > fee) — jackpot >= fee lets the winner receive 0 after the oracle fee is deducted."
+      "require(prizePot/jackpot > fee) — >= fee lets the winner receive 0 after the oracle fee is deducted."
     );
+  }
+
+  // AI draw fee must be stored in lastDrawFee for refund accounting.
+  if (
+    reqDrawFn &&
+    has(/FlapAIConsumerBase/) &&
+    new RegExp(`${prizeBucketRe.source}\\s*-=\\s*fee`).test(reqDrawFn.body) &&
+    !/lastDrawFee\s*=/.test(reqDrawFn.body)
+  ) {
+    add(
+      "block",
+      "ai-draw-fee-not-tracked",
+      "requestDraw() must set lastDrawFee = fee when deducting from prizePotAmount/jackpot — refunds must restore the bucket."
+    );
+  }
+
+  // requestDraw with zero entrants must require entrants or advance lastDrawTime (no spam loop).
+  if (reqDrawFn && has(/lastDrawTime/) && has(/function\s+enter\s*\(/)) {
+    const zeroBranch = reqDrawFn.body.match(
+      new RegExp(`(?:${entrantArrayRe.source})\\.length\\s*==\\s*0[\\s\\S]{0,240}`)
+    )?.[0];
+    if (
+      zeroBranch &&
+      /return\s*;/.test(zeroBranch) &&
+      !/require\s*\([^)]*\.length\s*>\s*0/.test(reqDrawFn.body) &&
+      !/lastDrawTime\s*=\s*block\.timestamp/.test(zeroBranch)
+    ) {
+      add(
+        "block",
+        "lottery-no-entrants-spam",
+        "requestDraw() must require(entrantList.length > 0) or set lastDrawTime when no entrants — otherwise manager can spam NoEntrants forever."
+      );
+    }
   }
 
   // AI lottery: push payout in oracle callback can revert on contract winners.
@@ -1945,6 +2161,42 @@ export function scanSafety(
       "ai-lottery-push-payout",
       "In _fulfillReasoning credit claimablePrize[winner] and add claimPrize() — do not _sendNative(winner) in the oracle callback."
     );
+  }
+
+  // Pull-claim vaults must not emit PrizeCollected/RewardCollected in the oracle callback.
+  if (
+    fulfillFn &&
+    has(/FlapAIConsumerBase/) &&
+    /claimablePrize|claimableReward/.test(source) &&
+    /emit\s+(?:PrizeCollected|RewardCollected)\s*\(/.test(fulfillFn.body)
+  ) {
+    add(
+      "block",
+      "pull-prize-event-in-fulfill",
+      "Use PrizeAwarded in _fulfillReasoning when crediting claimablePrize — reserve PrizeCollected for claimPrize() only."
+    );
+  }
+
+  // AI lottery must disclose AI-provider selection and Guardian recovery in description/schema.
+  if (has(/FlapAIConsumerBase/) && has(/requestDraw/)) {
+    const descTrust = [
+      source.match(/function description[\s\S]*?^\s*\}/m)?.[0] ?? "",
+      extractVaultUISchemaBody(source) ?? "",
+    ].join("\n");
+    if (!/AI.{0,30}provider|AI.{0,20}oracle|AI.{0,20}selected|AI.{0,20}选择|provider/i.test(descTrust)) {
+      add(
+        "block",
+        "ai-lottery-no-provider-disclosure",
+        "AI lottery must disclose in description() and vaultUISchema.description that the winner is selected by the Flap AI provider (not verifiable on-chain randomness)."
+      );
+    }
+    if (!/Guardian|Rule 009|emergency recovery|应急/i.test(descTrust)) {
+      add(
+        "block",
+        "ai-lottery-guardian-undisclosed",
+        "Disclose inherited Guardian emergency recovery (Flap Rule 009) in description() and vaultUISchema.description."
+      );
+    }
   }
 
   // AI lottery: indexer events for draw lifecycle.
@@ -2001,6 +2253,11 @@ export function scanSafety(
   for (const detail of scanVaultLogic(source, userPrompt, vaultPlan)) {
     if (findings.some((f) => f.detail === detail)) continue;
     add("block", "vault-logic", detail);
+  }
+
+  for (const mf of scanMechanicCompleteness(source, userPrompt, vaultPlan)) {
+    if (findings.some((f) => f.rule === mf.rule)) continue;
+    add("block", mf.rule, mf.detail);
   }
 
   const level: SafetyLevel = findings.some((f) => f.level === "block")
@@ -2104,9 +2361,11 @@ async function compile(
   const source = `${PREAMBLE}\n${body.trim()}\n`;
   await writeFile(filePath, source, "utf8");
 
+  const artifactPath = path.join(REPO_ROOT, "out", fileName, `${contractName}.json`);
+
   try {
     // Build only the generated file's tree; the rest of the repo is cached.
-    await execAsync(`"${FORGE}" build "${filePath}" 2>&1`, {
+    const { stdout } = await execAsync(`"${FORGE}" build "${filePath}" 2>&1`, {
       cwd: REPO_ROOT,
       timeout: 120_000,
       maxBuffer: 1024 * 1024 * 16,
@@ -2117,38 +2376,50 @@ async function compile(
     } catch {
       /* formatting is cosmetic — ignore failures */
     }
-    const artifactPath = path.join(REPO_ROOT, "out", fileName, `${contractName}.json`);
     return { ok: true, errors: "", artifactPath, filePath };
   } catch (err: unknown) {
     const e = err as { stdout?: string; stderr?: string; message?: string };
-    const errors = (e.stdout || "") + (e.stderr || "") || e.message || "Unknown compile error";
-    return { ok: false, errors: cleanForgeOutput(errors), artifactPath: "", filePath };
+    const raw = (e.stdout || "") + (e.stderr || "") || e.message || "Unknown compile error";
+    if (isForgeCompileSuccess(raw)) {
+      try {
+        await execAsync(`"${FORGE}" fmt "${filePath}"`, { cwd: REPO_ROOT, timeout: 20_000 });
+      } catch {
+        /* formatting is cosmetic */
+      }
+      return { ok: true, errors: "", artifactPath, filePath };
+    }
+    return { ok: false, errors: cleanForgeOutput(raw), artifactPath: "", filePath };
   }
 }
 
 function cleanForgeOutput(out: string): string {
-  // Keep only Error/Warning lines + context, trim ansi noise.
-  return out
+  // Keep solc/forge errors; drop dependency revision noise when no real failure.
+  const cleaned = out
     .replace(/\x1b\[[0-9;]*m/g, "")
     .split("\n")
     .filter((l) => l.trim().length > 0)
-    .slice(0, 80)
-    .join("\n");
+    .filter((l) => !/Dependency 'lib\//.test(l) || !/revision mismatch/.test(l));
+  const hasSolcError = cleaned.some((l) => /\bError\b/.test(l) && !/Warning/.test(l));
+  const lines = hasSolcError ? cleaned : cleaned.filter((l) => !/^Warning:/.test(l.trim()));
+  return lines.slice(0, 80).join("\n");
 }
 
 export async function cleanupCodegen(): Promise<void> {
   if (existsSync(CODEGEN_DIR)) await rm(CODEGEN_DIR, { recursive: true, force: true });
 }
 
-async function readArtifact(artifactPath: string): Promise<{ abi: unknown[] | null; bytecodeSize: number | null }> {
+async function readArtifact(
+  artifactPath: string
+): Promise<{ abi: unknown[] | null; creationBytecode: string | null; bytecodeSize: number | null }> {
   try {
     const raw = await readFile(artifactPath, "utf8");
     const json = JSON.parse(raw);
     const bytecode: string = json?.bytecode?.object ?? "";
-    const size = bytecode.startsWith("0x") ? (bytecode.length - 2) / 2 : null;
-    return { abi: json?.abi ?? null, bytecodeSize: size };
+    const creationBytecode = bytecode.startsWith("0x") ? bytecode : null;
+    const size = creationBytecode ? (creationBytecode.length - 2) / 2 : null;
+    return { abi: json?.abi ?? null, creationBytecode, bytecodeSize: size };
   } catch {
-    return { abi: null, bytecodeSize: null };
+    return { abi: null, creationBytecode: null, bytecodeSize: null };
   }
 }
 
@@ -2367,6 +2638,8 @@ async function runCodegenPipeline(opts: {
   if (!vaultPlan) {
     emit?.({ type: "status", phase: "classifying", attempt: 0, message: "Classifying vault mechanic…" });
     vaultPlan = await classifyVaultPlan(userPrompt, apiKey, model);
+    emit?.({ type: "status", phase: "classifying", attempt: 0, message: "Designing mechanic lifecycle…" });
+    vaultPlan = await expandMechanicDesign(userPrompt, vaultPlan, apiKey, model);
   }
 
   const resolvedSystemPrompt = systemPrompt.includes("VAULT PLAN")
@@ -2403,16 +2676,18 @@ async function runCodegenPipeline(opts: {
   };
   let safety = scanSafety("", "GeneratedVault", safetyPrompt, { vaultPlan });
   let abi: unknown[] | null = null;
+  let creationBytecode: string | null = null;
   let bytecodeSize: number | null = null;
   let fullSource = "";
   let pendingFix: string | null = null;
+  let testFixAttempts = 0;
 
   const status = (phase: CodegenStatusPhase, message?: string) => {
     emit?.({
       type: "status",
       phase,
       attempt: attempts,
-      maxAttempts: MAX_PIPELINE_ATTEMPTS,
+      maxAttempts: MAX_TOTAL_ATTEMPTS,
       message: humanStatusMessage(phase, attempts, message),
     });
   };
@@ -2420,6 +2695,44 @@ async function runCodegenPipeline(opts: {
   const pushFix = (entry: FixLogEntry) => {
     fixLog.push(entry);
     emit?.({ type: "fix_log", entry });
+  };
+
+  const runIntegrationGate = async (): Promise<{ passed: boolean; errors: string }> => {
+    status("generating_tests", "Writing integration test (Rule 006)…");
+    const tr = await generateIntegrationTest(contractName, artifactPath, fullSource, apiKey, model, vaultPlan);
+    if (!tr.ok) {
+      pushFix({ phase: "generating_tests", attempt: attempts, message: tr.errors.slice(0, 200) });
+      return { passed: false, errors: `Integration test generation failed:\n${tr.errors}` };
+    }
+    integrationTestPath = tr.path;
+    pushFix({ phase: "generating_tests", attempt: attempts, message: tr.path });
+
+    status("generating_tests", "Running Foundry invariant tests…");
+    const testRun = await runIntegrationTests(contractName, tr.path);
+    integrationTestsPassed = testRun.ok || testRun.skipped === true;
+    if (!integrationTestsPassed) {
+      previousFailures.add("integration-test-failure");
+      pushFix({
+        phase: "test_fix",
+        attempt: attempts,
+        rule: "integration-test-failure",
+        message: testRun.errors.slice(0, 200),
+      });
+      return { passed: false, errors: testRun.errors };
+    }
+    return { passed: true, errors: "" };
+  };
+
+  const runAuditIfReady = async () => {
+    if (!ok || !integrationTestsPassed || specAudit.level !== "skipped") return;
+    status("auditing", "Flap pre-audit (advisory)…");
+    specAudit = await runSpecAudit(fullSource, contractName, apiKey, model, {
+      compiled: true,
+      safetyFindings: safety.findings,
+      advisory: true,
+    });
+    emit?.({ type: "spec_audit", audit: specAudit });
+    pushFix({ phase: "auditing", attempt: attempts, message: `spec: ${specAudit.level} (advisory)` });
   };
 
   while (attempts < MAX_PIPELINE_ATTEMPTS) {
@@ -2501,49 +2814,135 @@ async function runCodegenPipeline(opts: {
       continue;
     }
 
-    ({ abi, bytecodeSize } = await readArtifact(artifactPath));
+    ({ abi, creationBytecode, bytecodeSize } = await readArtifact(artifactPath));
 
-    status("generating_tests", "Writing integration test (Rule 006)…");
-    const tr = await generateIntegrationTest(contractName, artifactPath, fullSource, apiKey, model, vaultPlan);
-    if (tr.ok) {
-      integrationTestPath = tr.path;
-      pushFix({ phase: "generating_tests", attempt: attempts, message: tr.path });
-    } else {
-      pushFix({ phase: "generating_tests", attempt: attempts, message: tr.errors.slice(0, 160) });
-    }
-
-    if (tr.path) {
-      status("generating_tests", "Running Foundry invariant tests…");
-      const testRun = await runIntegrationTests(contractName, tr.path);
-      integrationTestsPassed = testRun.ok || testRun.skipped === true;
-      if (!testRun.ok && !testRun.skipped) {
-        previousFailures.add("integration-test-failure");
+    const gate = await runIntegrationGate();
+    if (!gate.passed) {
+      status("test_fix", "integration-test-failure");
+      if (/fs_permissions|not allowed to be accessed for read operations/i.test(gate.errors)) {
         pushFix({
           phase: "test_fix",
           attempt: attempts,
-          rule: "integration-test-failure",
-          message: testRun.errors.slice(0, 200),
+          rule: "integration-test-infra",
+          message: gate.errors.slice(0, 300),
         });
-        status("test_fix", "integration-test-failure");
-        messages.push({ role: "assistant", content: lastAssistant });
-        pendingFix = stream
-          ? testFixPromptStream(testRun.errors, vaultPlan, attempts, [...previousFailures])
-          : testFixPrompt(testRun.errors, vaultPlan, attempts, [...previousFailures]);
-        continue;
+        break;
       }
+      messages.push({ role: "assistant", content: lastAssistant });
+      pendingFix = stream
+        ? testFixPromptStream(gate.errors, vaultPlan, attempts, [...previousFailures])
+        : testFixPrompt(gate.errors, vaultPlan, attempts, [...previousFailures]);
+      continue;
     }
-
-    status("auditing", "Flap pre-audit (advisory)…");
-    specAudit = await runSpecAudit(fullSource, contractName, apiKey, model, {
-      compiled: true,
-      safetyFindings: safety.findings,
-      advisory: true,
-    });
-    emit?.({ type: "spec_audit", audit: specAudit });
-    pushFix({ phase: "auditing", attempt: attempts, message: `spec: ${specAudit.level} (advisory)` });
 
     break;
   }
+
+  let lastTestErrors =
+    fixLog.filter((f) => f.phase === "test_fix").at(-1)?.message ??
+    fixLog.filter((f) => f.phase === "generating_tests").at(-1)?.message ??
+    "";
+
+  while (
+    ok &&
+    safety.level !== "fail" &&
+    !integrationTestsPassed &&
+    testFixAttempts < MAX_TEST_FIX_ATTEMPTS
+  ) {
+    testFixAttempts++;
+    attempts++;
+    status("test_fix", lastTestErrors.slice(0, 120) || "Fixing integration test failures…");
+
+    if (pendingFix) {
+      messages.push({ role: "user", content: pendingFix });
+      pendingFix = null;
+    } else {
+      messages.push({
+        role: "user",
+        content: stream
+          ? testFixPromptStream(lastTestErrors, vaultPlan, attempts, [...previousFailures])
+          : testFixPrompt(lastTestErrors, vaultPlan, attempts, [...previousFailures]),
+      });
+    }
+
+    let lastAssistant: string;
+    if (stream && emit) {
+      const gen = await aiGenerateStream(client, model, messages, emit, attempts, {
+        phase: "test_fix",
+        attempt: attempts,
+        rule: "integration-test-failure",
+        message: lastTestErrors.slice(0, 120),
+      });
+      lastAssistant = gen.raw;
+      contractName = gen.contractName;
+      code = gen.code;
+      explanation = gen.explanation || explanation;
+    } else {
+      const gen = await aiGenerateJson(client, model, messages);
+      lastAssistant = gen.raw;
+      contractName = gen.contractName;
+      code = gen.code;
+      explanation = gen.explanation;
+    }
+
+    emit?.({ type: "name", contractName });
+    emit?.({ type: "explanation", text: explanation });
+    code = applyCommonCodegenPatches(code);
+
+    status("compiling");
+    const res = await compile(contractName, code);
+    ok = res.ok;
+    compileErrors = res.errors;
+    artifactPath = res.artifactPath;
+    filePath = res.filePath;
+
+    if (!ok) {
+      pushFix({ phase: "compile_fix", attempt: attempts, message: firstErrors(compileErrors) });
+      pendingFix = stream ? compileFixPromptStream(compileErrors) : compileFixPrompt(compileErrors);
+      messages.push({ role: "assistant", content: lastAssistant });
+      continue;
+    }
+
+    fullSource = `${PREAMBLE}\n${code.trim()}\n`;
+    if (filePath) {
+      try {
+        fullSource = await readFile(filePath, "utf8");
+      } catch {
+        /* use in-memory */
+      }
+    }
+
+    safety = scanSafetyCombined(code, fullSource, contractName, safetyPrompt, vaultPlan);
+    const blocking = safety.findings.filter((f) => f.level === "block");
+    if (blocking.length > 0) {
+      for (const b of blocking) previousFailures.add(b.rule);
+      pushFix({
+        phase: "safety_fix",
+        attempt: attempts,
+        rule: blocking.map((b) => b.rule).join(","),
+        message: blocking[0]!.detail,
+      });
+      messages.push({ role: "assistant", content: lastAssistant });
+      pendingFix = stream
+        ? safetyFixPromptStream(blocking, vaultPlan, attempts, [...previousFailures])
+        : safetyFixPrompt(blocking, vaultPlan, attempts, [...previousFailures]);
+      continue;
+    }
+
+    ({ abi, creationBytecode, bytecodeSize } = await readArtifact(artifactPath));
+    const gate = await runIntegrationGate();
+    if (!gate.passed) {
+      lastTestErrors = gate.errors;
+      messages.push({ role: "assistant", content: lastAssistant });
+      pendingFix = stream
+        ? testFixPromptStream(gate.errors, vaultPlan, attempts, [...previousFailures])
+        : testFixPrompt(gate.errors, vaultPlan, attempts, [...previousFailures]);
+      continue;
+    }
+    break;
+  }
+
+  await runAuditIfReady();
 
   if (!fullSource && code) fullSource = `${PREAMBLE}\n${code.trim()}\n`;
 
@@ -2557,13 +2956,35 @@ async function runCodegenPipeline(opts: {
     specAudit,
     vaultPlan,
     abi,
+    creationBytecode,
     bytecodeSize,
     attempts,
     integrationTestPath,
     integrationTestsPassed,
     fixLog,
-    autoFixExhausted: attempts >= MAX_PIPELINE_ATTEMPTS && safety.level === "fail",
+    autoFixExhausted:
+      (attempts >= MAX_PIPELINE_ATTEMPTS && safety.level === "fail") ||
+      (ok &&
+        safety.level !== "fail" &&
+        !integrationTestsPassed &&
+        testFixAttempts >= MAX_TEST_FIX_ATTEMPTS &&
+        attempts >= MAX_PIPELINE_ATTEMPTS),
   };
+}
+
+function pipelineSuccess(result: CodegenResult): boolean {
+  return result.compiled && result.safety.level !== "fail" && result.integrationTestsPassed;
+}
+
+function pipelineFinishMessage(result: CodegenResult): string | undefined {
+  if (result.autoFixExhausted && result.safety.level === "fail") {
+    return "Auto-fix exhausted — safety scanner still blocking.";
+  }
+  if (result.compiled && result.safety.level !== "fail" && !result.integrationTestsPassed) {
+    return "Auto-fix exhausted — integration tests still failing. Try refining the vault or check server logs.";
+  }
+  if (!result.compiled) return "Generation finished without a successful compile.";
+  return undefined;
 }
 
 // ── Public: generate a vault with compile-and-fix loop ──────────────────────
@@ -2662,16 +3083,10 @@ export async function generateVaultCodeStream(
     const full: CodegenResult = { ...result, mode: "openai" };
     emit({
       type: "status",
-      phase:
-        full.compiled && full.safety.level !== "fail" && (full.integrationTestsPassed || !full.integrationTestPath)
-          ? "done"
-          : "error",
+      phase: pipelineSuccess(full) ? "done" : "error",
       attempt: full.attempts,
-      maxAttempts: MAX_PIPELINE_ATTEMPTS,
-      message:
-        full.autoFixExhausted && full.safety.level === "fail"
-          ? "Auto-fix exhausted — safety scanner still blocking."
-          : undefined,
+      maxAttempts: MAX_TOTAL_ATTEMPTS,
+      message: pipelineFinishMessage(full),
     });
     emit({ type: "result", result: full });
   } catch (err) {
@@ -2720,16 +3135,10 @@ export async function generateVaultCodeRefineStream(
     const full: CodegenResult = { ...result, mode: "openai" };
     emit({
       type: "status",
-      phase:
-        full.compiled && full.safety.level !== "fail" && (full.integrationTestsPassed || !full.integrationTestPath)
-          ? "done"
-          : "error",
+      phase: pipelineSuccess(full) ? "done" : "error",
       attempt: full.attempts,
-      maxAttempts: MAX_PIPELINE_ATTEMPTS,
-      message:
-        full.autoFixExhausted && full.safety.level === "fail"
-          ? "Auto-fix exhausted — safety scanner still blocking."
-          : undefined,
+      maxAttempts: MAX_TOTAL_ATTEMPTS,
+      message: pipelineFinishMessage(full),
     });
     emit({ type: "result", result: full });
   } catch (err) {
@@ -2884,6 +3293,8 @@ Apply these exact fixes if relevant:
 4. Use claimablePrize[winner] += prize and claimPrize() — never _sendNative(winner) in _fulfillReasoning
 5. Staking: claim or preserve pending BEFORE user.amount +=; pendingReward must match claimReward accounting
 6. Survivor _fulfillReasoning: loop drawSnapshot to rebuild entrants BEFORE delete drawSnapshot; use survivors == 1 not drawSnapshot.length == 1
+7. receive() MUST NOT call _buyAndBurn — split msg.value into buybackBudget and weeklyJackpot in receive(); add executeBuyback(uint256 minTokensOut) onlyManager that drains buybackBudget via _buyAndBurn(amt, minTokensOut) with minTokensOut > 0
+8. enter() MUST cap entrants: MAX_ENTRANTS = 255 and require(entrants.length < MAX_ENTRANTS) — not only at requestDraw
 
 Blocking issues still present:
 
@@ -2944,6 +3355,7 @@ function stubResult(prompt: string): CodegenResult {
     },
     vaultPlan,
     abi: null,
+    creationBytecode: null,
     bytecodeSize: null,
     attempts: 0,
     integrationTestPath: null,

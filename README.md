@@ -6,9 +6,9 @@ Right now, launching a custom vault on Flap requires a lot of coding skills. You
 
 **Flap Vault Gen fixes the front half.**
 
-Describe the mechanic in plain English. It turns that into Solidity using Flap’s base contracts, compiles it with Foundry, catches compile and safety issues, runs the 9-rule Flap pre-audit, then lets you keep refining in chat.
+Describe the mechanic in plain English. It turns that into Solidity using Flap’s base contracts, compiles it with Foundry, runs static + behavioral checks, and shows an **advisory** 9-rule Flap pre-audit — then lets you keep refining in chat.
 
-This isn’t “AI wrote a contract.” It’s **AI, Foundry, Flap rule scanners, and the spec corpus running in one loop.**
+This isn’t “AI wrote a contract.” It’s **classify → design → AI draft → Foundry compile → dual safety scan → forge test → advisory audit** in one loop.
 
 The output deploys through **`CodegenVaultFactory`**. Testnet first. Mainnet still needs a real audit.
 
@@ -22,14 +22,17 @@ Each generation runs the same closed loop until it passes or exhausts its retry 
 
 | Step | What runs | Purpose |
 |------|-----------|---------|
+| **0. Classify** | `classifyVaultPlan()` | JSON vault kind + buckets + invariants before codegen |
+| **0b. Mechanic design** | `expandMechanicDesign()` | Lifecycle contract for novel prompts (milestone, register+claim, …) |
 | **1. Draft** | OpenAI (`gpt-4.1`) | Writes a complete vault inheriting `CodegenVaultBase` / Flap V2 — not a template picker |
-| **2. Compile** | **Foundry** (`forge build`, solc **0.8.26**) | Real compile against Flap interfaces in this repo; compile errors feed back to AI |
-| **3. Safety scan** | Static scanners in `server/codegen.ts` | Blocks `receive()` swaps, block randomness, full-balance payouts, missing base overrides, etc. |
-| **4. Logic scan** | `scanVaultLogic()` | Mechanic-specific checks (lottery snapshots, survivor elimination, staking accrual, oracle callbacks) |
-| **5. Fix loop** | AI + scanners | Retries compile failures, safety blocks, and spec FAILs with targeted fix prompts |
-| **6. Integration test** | Foundry + AI | Generates a mainnet-fork test scaffold (Flap Rule **006**) |
-| **7. Flap pre-audit** | 9-rule spec corpus | AI verifier loads rules **001–009** (fund flow, factory, fairness, UI, receive gas, oracle, triggers, emergency) |
-| **8. Refine in chat** | Same pipeline | Incremental edits re-run compile → safety → audit |
+| **2. Compile** | **Foundry** (`forge build`, solc **0.8.26**) | Real compile against Flap interfaces; compile errors feed back to AI |
+| **3. Dual safety scan** | `scanSafetyCombined()` | Child + full injected source; logic + **mechanic completeness** scanners |
+| **4. Fix loop** | AI + structured failure memory | Retries compile / safety / **fork test** failures (up to 12 passes) |
+| **5. Integration test** | Foundry + AI | Generates mainnet-fork test (Rule **006**) and **runs `forge test --fork-url`** |
+| **6. Flap pre-audit** | 9-rule spec corpus | **Advisory** LLM review (001–009); does not alone block deploy-ready |
+| **7. Refine in chat** | Same pipeline | Incremental edits re-run the full loop |
+
+**Deploy-ready gate:** compile OK + safety scanners pass + integration tests pass (when fork RPC available). Pre-audit is for human review.
 
 **Deploy path:** compiled creation bytecode → **`CodegenVaultFactory`** (CREATE2) → Flap token launch on testnet or mainnet.
 
@@ -44,7 +47,9 @@ No fixed template menu. Each vault is generated for your prompt, then validated 
 | Path | Purpose |
 |------|---------|
 | `web/` | Codegen Studio UI (React + Vite) |
-| `server/` | AI codegen API, safety pipeline, spec audit |
+| `server/` | AI codegen API, VaultPlan classification, safety pipeline, mechanic completeness, spec audit |
+| `server/vault-plan.ts` | Vault kind classification + novel mechanic lifecycle design |
+| `server/mechanic-completeness.ts` | Dead register/claim path scanners for custom mechanics |
 | `src/flap/` | Flap V2 protocol interfaces (required for compile) |
 | `src/CodegenVaultFactory.sol` | On-chain factory for generated vault bytecode |
 | `docs/CODEGEN_STUDIO.md` | User guide — prompts, lottery/oracle notes, deploy-ready |
@@ -89,7 +94,7 @@ See `railway.toml` and `web/vercel.json`.
 ## Verify / test
 
 ```bash
-cd server && npm run test:scanners          # static safety scanner self-check
+cd server && npm run test:scanners          # safety + mechanic completeness self-checks
 cd server && npx tsx verify-codegen.mts     # generate 3 vaults + logic review
 ```
 

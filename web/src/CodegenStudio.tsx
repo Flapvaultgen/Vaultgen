@@ -18,10 +18,12 @@ import {
   type RefineSession,
   type SpecAuditResult,
 } from "./lib/codegen";
-import { MAX_PIPELINE_ATTEMPTS, type CodeResetInfo, type PipelinePhase } from "./lib/pipeline-status";
+import { MAX_TOTAL_PIPELINE_ATTEMPTS, type CodeResetInfo, type PipelinePhase } from "./lib/pipeline-status";
+import { getDeployBlockReason, isDeployReady } from "./lib/deploy-gate";
 import CodegenChatPanel, { type ChatUiMessage } from "./components/CodegenChatPanel";
 import PipelineProgress from "./components/PipelineProgress";
 import SpecAuditPanel from "./components/SpecAuditPanel";
+import DeployVaultPanel from "./components/DeployVaultPanel";
 import { Button } from "./components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "./components/ui/card";
 import { Textarea } from "./components/ui/textarea";
@@ -67,7 +69,7 @@ export default function CodegenStudio({ onChatActive }: Props) {
 
   const [phase, setPhase] = useState<Phase>("idle");
   const [attempt, setAttempt] = useState(0);
-  const [maxAttempts, setMaxAttempts] = useState(MAX_PIPELINE_ATTEMPTS);
+  const [maxAttempts, setMaxAttempts] = useState(MAX_TOTAL_PIPELINE_ATTEMPTS);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [fixLog, setFixLog] = useState<FixLogEntry[]>([]);
   const [resetInfo, setResetInfo] = useState<CodeResetInfo | null>(null);
@@ -99,7 +101,7 @@ export default function CodegenStudio({ onChatActive }: Props) {
     setResetInfo(null);
     setPhase("idle");
     setAttempt(0);
-    setMaxAttempts(MAX_PIPELINE_ATTEMPTS);
+    setMaxAttempts(MAX_TOTAL_PIPELINE_ATTEMPTS);
     setRunning(false);
   }, []);
 
@@ -134,7 +136,7 @@ export default function CodegenStudio({ onChatActive }: Props) {
         if (ev.result.fixLog.length > 0) setFixLog(ev.result.fixLog);
         if (ev.result.safety.level === "fail" || !ev.result.compiled) {
           setStatusMsg(
-            ev.result.attempts >= MAX_PIPELINE_ATTEMPTS
+            ev.result.attempts >= MAX_TOTAL_PIPELINE_ATTEMPTS
               ? `Auto-fix stopped after ${ev.result.attempts} passes — ${ev.result.safety.findings.find((f) => f.level === "block")?.detail ?? "see safety scan"}`
               : ev.result.safety.findings.find((f) => f.level === "block")?.detail ?? "Generation finished with issues"
           );
@@ -170,7 +172,7 @@ export default function CodegenStudio({ onChatActive }: Props) {
     setFixLog([]);
     setResetInfo(null);
     setAttempt(0);
-    setMaxAttempts(MAX_PIPELINE_ATTEMPTS);
+    setMaxAttempts(MAX_TOTAL_PIPELINE_ATTEMPTS);
     setPhase("writing");
     setRunning(true);
     try {
@@ -204,7 +206,7 @@ export default function CodegenStudio({ onChatActive }: Props) {
     setFixLog([]);
     setResetInfo(null);
     setAttempt(0);
-    setMaxAttempts(MAX_PIPELINE_ATTEMPTS);
+    setMaxAttempts(MAX_TOTAL_PIPELINE_ATTEMPTS);
     setPhase("writing");
     setRunning(true);
 
@@ -244,11 +246,8 @@ export default function CodegenStudio({ onChatActive }: Props) {
     setTimeout(() => setCopied(false), 1800);
   }, []);
 
-  const deployable =
-    !!result &&
-    result.compiled &&
-    result.safety.level !== "fail" &&
-    (result.integrationTestsPassed || !result.integrationTestPath);
+  const deployable = !!result && isDeployReady(result);
+  const deployBlockReason = result ? getDeployBlockReason(result) : null;
   const safety = result ? SAFETY[result.safety.level] : null;
   const specLevel = result?.specAudit.level;
   const specFails = result ? specFailRules(result.specAudit) : [];
@@ -329,10 +328,15 @@ export default function CodegenStudio({ onChatActive }: Props) {
               )}
               <span className="font-medium">{deployable ? "Ready for testnet" : "Not deployable yet"}</span>
             </div>
+            {deployBlockReason && (
+              <p className="mt-1 text-muted-foreground">{deployBlockReason}</p>
+            )}
             {specFails.length > 0 && (
-              <p className="mt-1 text-muted-foreground">FAIL rules: {specFails.join(", ")}</p>
+              <p className="mt-1 text-muted-foreground">Spec FAIL rules: {specFails.join(", ")}</p>
             )}
           </div>
+
+          <DeployVaultPanel deployable={deployable} creationBytecode={result.creationBytecode} />
         </CardContent>
       </Card>
   ) : null;

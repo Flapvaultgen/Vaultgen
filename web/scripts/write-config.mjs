@@ -25,12 +25,15 @@ const apiUrl = process.env.VERCEL
       ? raw
       : `https://${raw}`;
 
+const sandboxDeployer = (process.env.VITE_SANDBOX_DEPLOYER ?? "").trim();
+
 writeFileSync(
   publicConfig,
   JSON.stringify(
     {
       ...existing,
       apiUrl,
+      ...(sandboxDeployer ? { sandboxDeployer } : {}),
     },
     null,
     2
