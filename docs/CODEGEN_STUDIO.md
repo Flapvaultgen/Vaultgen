@@ -2,36 +2,38 @@
 
 **Flap Vault Gen is v0 for tax vaults.**
 
-Right now, launching a custom vault on Flap requires a lot of coding skills. You need Solidity help. You need to understand the 9 spec rules. You need to avoid dumb EVM footguns like `receive()` gas limits and block randomness. And even after all that, there’s a decent chance an audit catches something obvious on day one.
+Launching a custom vault on Flap normally requires Solidity expertise, Flap Rules 001–009, and avoiding EVM footguns. **Flap Vault Gen** automates the front half: describe the mechanic in plain English, get a **MechanicSpec** plan, a **scope verdict**, generated Solidity, Foundry compile, deterministic safety scanners, fork tests, and an advisory 9-rule pre-audit — then refine in chat.
 
-**Flap Vault Gen fixes the front half.**
-
-Describe the mechanic in plain English. It turns that into Solidity using Flap’s base contracts, compiles it with Foundry, runs static + behavioral checks, and shows an **advisory** 9-rule Flap pre-audit — then lets you keep refining in chat.
-
-This isn’t “AI wrote a contract.” It’s **classify → design → AI draft → Foundry compile → dual safety scan → forge test → advisory audit** in one loop.
-
-The output deploys through **`CodegenVaultFactory`**. Testnet first. Mainnet still needs a real audit.
+There is **no menu of vault types**. Any mechanic that fits Flap Rules 001–009 can be built. Output deploys through **`CodegenVaultFactory`**. Testnet first. Mainnet still needs human review and a third-party audit.
 
 ---
 
 ## What runs when you click Generate
 
-The studio is not a one-shot chat completion. Each pass runs this pipeline:
+1. **Mechanic plan** — AI outputs a `MechanicSpec` JSON (actors, buckets, actions, payout rules, applicable Flap rules). Regex fallback if no API key.
+2. **Scope verdict** — Before codegen: `launch_ready_possible`, `draft_only`, `needs_custom_ui`, `needs_protocol_extension`, or `unsafe_or_unsupported`. Non-launch verdicts require explicit consent.
+3. **Draft** — AI writes a full vault inheriting `CodegenVaultBase` with Flap V2 helpers.
+4. **Compile** — Foundry `forge build` with solc 0.8.26 against real Flap interfaces.
+5. **Dual safety scan** — Static blockers + mechanic completeness + **economic payout scanners** (e.g. first claimer draining shared pools).
+6. **Fix loop** — Up to 12 retries with structured failure memory.
+7. **Integration test** — Mainnet-fork Foundry test (Rule 006); skipped when `SKIP_FORK_TESTS=1` or no RPC.
+8. **Flap pre-audit (advisory)** — 9-rule LLM review; FAIL items downgraded to warnings — do not alone block deploy.
+9. **Economic critic (advisory)** — Optional GPT payout fairness review after scanners pass.
+10. **Chat refine** — Follow-up messages run the same loop on your existing vault.
 
-1. **Classify** — AI outputs a `VaultPlan` JSON (kind: staking / lottery / survivor / buyback / hybrid, buckets, required views/events). Regex fallback if no API key.
-2. **Mechanic design** (novel prompts) — For milestones, register+claim, tiers, etc., a second cheap JSON step defines the **lifecycle contract** (who gets credited, when, which UI methods are required). Pure burn vs user-rewards mode is chosen upfront.
-3. **Draft** — AI writes a full vault contract (inherits `CodegenVaultBase`, uses Flap V2 tax/oracle helpers). The prompt includes VaultPlan invariants.
-4. **Compile** — **Foundry** runs `forge build` with **solc 0.8.26** against real Flap interfaces. Failures go back to AI with compiler output.
-5. **Dual safety scan** — Static blockers on **child source + full injected source** (includes inherited Rule 009 emergency from `CodegenVaultBase`):
-   - Cheap `receive()`, no block randomness for winners, named buckets, bilingual requires, UI schema completeness
-   - Mechanic-specific logic (lottery snapshots, staking accrual, survivor elimination, …)
-   - **Mechanic completeness** (novel vaults): dead `claimReward()` paths, `register*` never consumed, missing `registerInterest` in UI schema, unbounded `milestoneIndex`, pool zeroed without payout
-6. **Fix loop** — Structured **failure memory** (previous rule IDs + vault-kind checklist) on each retry. Up to 12 passes for compile / safety / test failures.
-7. **Integration test** — AI writes a **mainnet-fork Foundry test** scaffold (Flap Rule **006**), then the pipeline **runs `forge test --fork-url`** on it when RPC is available (`SKIP_FORK_TESTS=1` skips).
-8. **Flap pre-audit (advisory)** — Verifier reads the **9 official spec rules** (001–009) and returns pass / warn / fail per rule. LLM FAIL items are **downgraded to warnings** — they inform you but do **not** block deploy-ready. **Deterministic scanners + passing fork tests** are the gate.
-9. **Chat refine** — Follow-up messages run the same loop on your existing vault.
+---
 
-When the panel shows **Deploy ready**, you have compiled bytecode that cleared **safety scanners + integration tests** — good for **testnet**. Read the advisory pre-audit panel yourself; mainnet still needs human review and a third-party audit.
+## Scope verdicts
+
+| Verdict | Meaning |
+|---------|---------|
+| **launch_ready_possible** | Fits Flap as described — codegen proceeds |
+| **draft_only** | Useful spec, not launch-ready as requested |
+| **needs_custom_ui** | Needs custom frontend beyond Flap.sh UI |
+| **needs_protocol_extension** | Needs Flap protocol changes |
+| **unsafe_or_unsupported** | Refused — no contract generated |
+
+If you consent to **closest draft**, the studio lists what was preserved, dropped, and required for the original request.
 
 ---
 
@@ -45,17 +47,9 @@ When the panel shows **Deploy ready**, you have compiled bytecode that cleared *
 | **004** UI-friendly | Bilingual `require` messages for Flap.sh UI |
 | **005** Receive gas limit | No swaps, loops, or payouts inside `receive()` |
 | **006** Integration tests | Mainnet-fork Foundry coverage exists |
-| **007** AI oracle | Random outcomes via Flap AI Provider, not block entropy |
+| **007** AI oracle | Random outcomes via Flap AI Provider |
 | **008** Trigger service | Scheduled / keeper actions where needed |
 | **009** Emergency controls | Override + emergency withdraw patterns |
-
----
-
-## Deploy paths
-
-**Studio default (testnet):** non-upgradeable constructor vault → `CodegenVaultFactory` CREATE2 bytecode deploy. Rule 009 emergency withdraw is inherited from `CodegenVaultBase` (Guardian full-balance drain — disclosed in staking/lottery descriptions).
-
-**Production (say "upgradeable" or "mainnet-ready" in your prompt):** generator switches to the FreeCoinBeacon pattern — `Initializable` vault + `UpgradeableBeacon` factory + `BeaconProxy`. No emergency drain functions on the vault; Guardian-only upgrades are the escape hatch.
 
 ---
 
@@ -63,122 +57,52 @@ When the panel shows **Deploy ready**, you have compiled bytecode that cleared *
 
 ### 1. Describe the mechanic
 
-In the text box, explain what should happen when tax BNB arrives and what holders can do.
+Use the hero prompt. Name tax buckets, user actions, timing, and random winners if needed.
 
-**Good prompts name:**
-- Where tax goes (buyback, jackpot, treasury, stakers, etc.)
-- What users can call (`stake`, `enter`, `claim`, etc.)
-- Any timing (weekly draw, 24h window, lock period)
-- Whether you need a **random winner** or **survivor elimination** (see below)
-
-**Examples you can paste:**
-
-- *Stake-to-earn: holders stake the tax token and earn a pro-rata share of tax BNB. stake, unstake, claimReward.*
-- *Buyback vault: split tax 50/50 into buyback budget and creator treasury. Manager runs buyback with slippage protection.*
-- *Weekly burn lottery: tax fills buyback + jackpot. Holders enter once per round. Manager runs a secure random draw for the jackpot.*
-- *Survivor: users stake to join. Each round one staker is eliminated at random until one winner takes the pool.*
-
-Click **Generate**. The contract streams in on the right while the studio compiles and checks it.
+**Examples:**
+- *Stake-to-earn: holders stake and earn pro-rata tax BNB. stake, unstake, claimReward.*
+- *Buyback vault: split tax 50/50 buyback + treasury. Manager runs buyback.*
+- *Weekly burn lottery: buyback + jackpot buckets. Holders enter once per round. Secure random draw.*
+- *Quest proof vault: users submit proofs, manager approves, approved users claim from reward bucket.*
 
 ### 2. Review the result
 
-When generation finishes, you will see:
-
-| Panel | What it means for you |
-|-------|------------------------|
-| **Compiled** | Solidity built successfully with the real Flap compiler |
-| **Safety** | **pass** = no blocking scanner issues · **review** = warnings worth reading · **blocked** = must fix before testnet |
-| **Flap pre-audit** | **Advisory** — 9-rule LLM review (fund flow, fairness, UI, …). WARN/FAIL here guides human review; it does not alone block deploy. |
-| **Deploy ready** | Green when **compile + safety pass + fork tests pass** (if tests ran). Not a guarantee of novel-mechanic correctness — read the code. |
-
-The timeline shows what the studio did for you — writing code, fixing compile errors, running checks — so you do not have to do that by hand.
+| Panel | What it means |
+|-------|----------------|
+| **Compiled** | Solidity built with Foundry + Flap interfaces |
+| **Safety** | pass / review / blocked |
+| **Scope** | Launch-ready vs draft-only |
+| **Flap pre-audit** | Advisory — does not alone block deploy |
+| **Deploy ready** | Compile + safety pass + fork tests |
 
 ### 3. Refine in chat
 
-After the first generation, the view switches to **chat mode**. Keep the code panel open and ask for changes in normal language, for example:
-
-- *Add a 7-day unstake lock*
-- *Cap lottery entrants at 255*
-- *Split tax 40% buyback, 40% charity wallet, 20% treasury*
-- *Use pull-payment so winners claim their prize instead of auto-send*
-
-Each message updates the same vault (it does not start from scratch unless you click **New vault**).
+After first generation, chat mode opens. Each message updates the same vault. **New vault** starts fresh.
 
 ---
 
 ## Writing better prompts
 
-**Do:**
-- Say how tax BNB is **split into buckets** (buybackBudget, jackpot, treasury, …)
-- Say who acts — **holders** vs **manager/creator**
-- Mention **lottery / random / survivor** if you need a random pick (the studio uses Flap’s secure oracle)
-- Mention **scheduled** actions if something should run on a timer (e.g. automated buyback every 6 hours)
+**Do:** named buckets, holder vs manager actions, lottery/oracle when needed, per-user payout accounting for multi-user rewards.
 
-**Avoid:**
-- *“Pay everyone by current token balance”* — that is gameable; ask for **staking + rewards** instead
-- *“Do the buyback inside receive()”* — tax arrives in `receive()`; buyback must be a separate manager action
-- *“List all token holders on-chain”* — impossible; use a **keeper list** or **stake to participate**
-- *“Register interest AND claim rewards”* without saying **how rewards are credited** — either ask for **pure milestone burn** (no claim) or specify **register → advance → credit claimable → claim**
-
-**Novel mechanics (milestones, tiers, campaigns):**
-- Say whether users **only track eligibility** or **actually receive rewards**
-- If users claim, say **when** balances are credited (e.g. on `advanceMilestone`, not only in `claimReward`)
-- List every **user-facing function** you want in the Flap UI (`registerInterest`, `claimReward`, …)
+**Avoid:** balance-based payouts, buyback in `receive()`, on-chain holder enumeration, register+claim without credit source.
 
 ---
 
-## Lotteries, raffles, and random winners
+## Lotteries and random winners
 
-If your vault picks a winner or eliminates a player at random, Flap uses the **Flap AI Provider** — an on-chain oracle (VRF-style: request → wait → verified callback). This is **not** `block.prevrandao` and not Chainlink on BSC.
-
-**What you get:**
-- Entrants are **snapshotted** before the draw so no one can join after the result is known
-- The manager calls something like `requestDraw()` and pays a small oracle fee (usually from the jackpot)
-- The oracle returns a random index; the vault pays the winner in `_fulfillReasoning`
-
-**What to tell users in your token description:**
-- Draws are async (not instant in the same button click)
-- Randomness comes from the Flap AI oracle (small fee per draw)
-- Manager still chooses **when** to start a draw unless you also ask for scheduled automation
-
-For **survivor / elimination** games, the same oracle pattern applies — one random elimination per round until one staker remains.
-
----
-
-## What the studio checks automatically
-
-You do not need to memorize Flap’s spec. Behind the scenes the studio enforces common rules, including:
-
-- Tax in `receive()` only updates **buckets** — no swaps or payouts there
-- Payouts use **named buckets**, not “send entire contract balance”
-- User-facing errors use **bilingual** `require` messages (English / 中文) for the Flap UI
-- Lotteries cap entrants (gas safety) and reset entry flags between rounds
-- Random outcomes use the **Flap AI oracle**, not block entropy
-- Staking rewards use proper **accrual math**, not live wallet balance
-- **No half-implemented paths**: `claimReward()` must have a credit source; `register*()` must connect to advance/distribute or be removed
-- **Full-source scan** catches inherited Rule 009 emergency behavior on staking vaults (disclosure required)
-
-If something fails, the studio **retries and fixes** on its own (compile errors, safety blocks, fork test failures) before showing you the result.
+Flap uses the **Flap AI Provider** (VRF-style oracle). Entrants snapshotted before draw; manager calls `requestDraw()`; async callback pays winner. Not `block.prevrandao`.
 
 ---
 
 ## Deploy ready vs mainnet ready
 
-**Deploy ready (green in the studio)** means the vault **compiled**, passed **blocking safety scanners**, and **fork integration tests** (when RPC available).
+**Deploy ready** = compile + blocking scanners pass + fork tests (when RPC available). Read code yourself, test on BSC testnet, get independent audit for meaningful TVL.
 
-The **Flap pre-audit panel is advisory** — treat WARN/FAIL items as a human checklist, not an automatic pass/fail gate.
-
-Before **mainnet** and real holder funds:
-
-1. Read the generated code and the pre-audit panel yourself
-2. Test on **BSC testnet** with small amounts
-3. Treat **warnings** (especially fairness / integration-test items) as a human review checklist
-4. Get an independent audit for anything with meaningful TVL
-
-To launch a token with your vault on [Flap.sh](https://flap.sh), you will deploy through a **vault factory** with your contract bytecode. See the [Flap vault README](https://github.com/flap-sh/vaults) for the on-chain launch flow.
+Launch via **`CodegenVaultFactory`** on [Flap.sh](https://flap.sh).
 
 ---
 
-## Self-hosting (optional)
+## Self-hosting
 
-If you run the studio yourself instead of a hosted version: install Foundry and Node, set `OPENAI_API_KEY` in `server/.env.local`, then from the `web` folder run `npm run dev:all` and open http://localhost:5173. Details are in the repository README for developers.
+Set `OPENAI_API_KEY` in `server/.env.local`, then from `web`: `npm run dev:all` → http://localhost:5173

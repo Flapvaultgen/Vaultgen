@@ -1,15 +1,18 @@
+# OS junk
+.DS_Store
+
 # Compiler files
 cache/
 out/
 
-# Ignores development broadcast logs
-!/broadcast
-/broadcast/*/31337/
-/broadcast/**/dry-run/
+# Local broadcast logs (testnet/mainnet run receipts — keep out of the repo)
+broadcast/
 
-# Docs (platform user guide is tracked; other docs optional)
-docs/*
-!docs/CODEGEN_STUDIO.md
+# Local scratch
+misc/
+
+# Separate website-generator experiment — not part of this release
+websitegen/
 
 # Dotenv files
 .env

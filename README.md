@@ -24,7 +24,7 @@ Each generation runs the same closed loop until it passes or exhausts its retry 
 |------|-----------|---------|
 | **0. Classify** | `classifyVaultPlan()` | JSON vault kind + buckets + invariants before codegen |
 | **0b. Mechanic design** | `expandMechanicDesign()` | Lifecycle contract for novel prompts (milestone, register+claim, …) |
-| **1. Draft** | OpenAI (`gpt-4.1`) | Writes a complete vault inheriting `CodegenVaultBase` / Flap V2 — not a template picker |
+| **1. Draft** | OpenAI (`gpt-5.4`, override with `OPENAI_MODEL`) | Writes a complete vault inheriting `CodegenVaultBase` / Flap V2 — not a template picker |
 | **2. Compile** | **Foundry** (`forge build`, solc **0.8.26**) | Real compile against Flap interfaces; compile errors feed back to AI |
 | **3. Dual safety scan** | `scanSafetyCombined()` | Child + full injected source; logic + **mechanic completeness** scanners |
 | **4. Fix loop** | AI + structured failure memory | Retries compile / safety / **fork test** failures (up to 12 passes) |
@@ -53,6 +53,7 @@ No fixed template menu. Each vault is generated for your prompt, then validated 
 | `src/flap/` | Flap V2 protocol interfaces (required for compile) |
 | `src/CodegenVaultFactory.sol` | On-chain factory for generated vault bytecode |
 | `docs/CODEGEN_STUDIO.md` | User guide — prompts, lottery/oracle notes, deploy-ready |
+| `docs/PROJECT_OVERVIEW.md` | Project vision, current state, gaps, architecture, code references |
 
 ---
 
@@ -85,7 +86,7 @@ cd ../web && npm run dev:all
 
 **Vercel env:** `VITE_API_URL=https://your-railway-service.up.railway.app`
 
-**Railway env:** `OPENAI_API_KEY`, `OPENAI_MODEL=gpt-4.1`, `CORS_ORIGIN=https://your-vercel-app.vercel.app`
+**Railway env:** `OPENAI_API_KEY`, `OPENAI_MODEL=gpt-5.4` (or `gpt-5.5`), `CORS_ORIGIN=https://your-vercel-app.vercel.app`, `AUTH_SECRET` (long random string — signs wallet session tokens), and optionally `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` for persistent chat history (apply `supabase/schema.sql` first; without them the server uses an in-memory store)
 
 See `railway.toml` and `web/vercel.json`.
 
