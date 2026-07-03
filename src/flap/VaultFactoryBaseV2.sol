@@ -212,7 +212,7 @@ abstract contract VaultFactoryBaseV2 is IVaultFactory, IVaultFactoryValidationV2
     ///      algorithm.
     ///
     /// @return schema The vault data schema for this factory.
-    function vaultDataSchema() public pure virtual returns (VaultDataSchema memory schema);
+    function vaultDataSchema() public view virtual returns (VaultDataSchema memory schema);
 
     /// @notice Deprecated legacy hook called by VaultPortal immediately before a new V6
     ///         tax token is created via `newTokenV6WithVault`.

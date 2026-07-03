@@ -69,7 +69,7 @@ contract StakeToEarnVaultMainnetTest is FlapBSCFixture {
     }
 
     function test_StakeToEarnVault_writeMethodsDocumented() public view {
-        // Documents stake, unstake, claimReward, pendingReward for StakeToEarnVault audit trail (Rule 006).
+        // Documents stake, unstake, claimReward, pendingReward, stakedBalance for StakeToEarnVault audit trail (Rule 006).
         assertTrue(vault != address(0));
     }
 

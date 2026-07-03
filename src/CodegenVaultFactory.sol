@@ -4,6 +4,7 @@ pragma solidity ^0.8.13;
 import {VaultFactoryBaseV2} from "./flap/VaultFactoryBaseV2.sol";
 import {IVaultFactoryValidationV2} from "./flap/IVaultFactory.sol";
 import {VaultDataSchema, FieldDescriptor} from "./flap/IVaultSchemasV1.sol";
+import {BytecodeStorage} from "./BytecodeStorage.sol";
 
 /// @title CodegenVaultFactory
 /// @notice Meta-factory for AI-generated ("codegen") vaults.
@@ -29,10 +30,36 @@ contract CodegenVaultFactory is VaultFactoryBaseV2 {
     uint256 public constant MAX_INIT_CODE = 49_152;
 
     event CodegenVaultDeployed(address indexed taxToken, address indexed creator, address vault, uint256 initCodeSize);
+    event VaultRegistered(address indexed launcher, string vaultDescription, uint256 creationCodeSize);
 
     error EmptyInitCode();
     error InitCodeTooLarge(uint256 size);
     error DeployFailed();
+    error NotRegistered();
+
+    /// @dev Launcher wallet → vault creation bytecode (stored via BytecodeStorage — see that
+    ///      file for why plain SSTORE won't fit under public RPCs' ~16.7M gas send cap) +
+    ///      human description (shown on Flap schema load).
+    mapping(address => address[]) private _registeredCreationCodePointers;
+    mapping(address => string) private _registeredDescription;
+
+    /// @notice Register vault bytecode before launching on flap.sh (empty vaultData schema on Flap).
+    function registerVault(bytes calldata creationCode, string calldata vaultDescription) external {
+        if (creationCode.length == 0) revert EmptyInitCode();
+        if (creationCode.length > MAX_INIT_CODE) revert InitCodeTooLarge(creationCode.length);
+        delete _registeredCreationCodePointers[msg.sender];
+        _registeredCreationCodePointers[msg.sender] = BytecodeStorage.write(creationCode);
+        _registeredDescription[msg.sender] = vaultDescription;
+        emit VaultRegistered(msg.sender, vaultDescription, creationCode.length);
+    }
+
+    function registeredVaultDescription(address launcher) external view returns (string memory) {
+        return _registeredDescription[launcher];
+    }
+
+    function hasRegisteredBytecode(address launcher) external view returns (bool) {
+        return _registeredCreationCodePointers[launcher].length > 0;
+    }
 
     function newVault(address taxToken, address, address creator, bytes calldata vaultData)
         external
@@ -40,11 +67,23 @@ contract CodegenVaultFactory is VaultFactoryBaseV2 {
         returns (address vault)
     {
         require(msg.sender == _getVaultPortal(), "Only VaultPortal");
-        if (vaultData.length == 0) revert EmptyInitCode();
-        if (vaultData.length > MAX_INIT_CODE) revert InitCodeTooLarge(vaultData.length);
+
+        bytes memory creationCode;
+        if (vaultData.length > 0) {
+            creationCode = _parseCreationCode(vaultData);
+        } else {
+            address[] memory pointers = _registeredCreationCodePointers[creator];
+            if (pointers.length == 0) revert NotRegistered();
+            creationCode = BytecodeStorage.read(pointers);
+            delete _registeredCreationCodePointers[creator];
+            delete _registeredDescription[creator];
+        }
+
+        if (creationCode.length == 0) revert EmptyInitCode();
+        if (creationCode.length > MAX_INIT_CODE) revert InitCodeTooLarge(creationCode.length);
 
         // initCode = creationBytecode ++ abi.encode(taxToken, creator, address(this))
-        bytes memory initCode = abi.encodePacked(vaultData, abi.encode(taxToken, creator, address(this)));
+        bytes memory initCode = abi.encodePacked(creationCode, abi.encode(taxToken, creator, address(this)));
         bytes32 salt = keccak256(abi.encodePacked(taxToken, creator));
 
         assembly {
@@ -52,7 +91,35 @@ contract CodegenVaultFactory is VaultFactoryBaseV2 {
         }
         if (vault == address(0)) revert DeployFailed();
 
-        emit CodegenVaultDeployed(taxToken, creator, vault, vaultData.length);
+        emit CodegenVaultDeployed(taxToken, creator, vault, creationCode.length);
+    }
+
+    /// @dev Flap UI ABI-encodes the single `creationCode` schema field as `abi.encode(bytes)`.
+    ///      Raw creation bytecode is still accepted for direct portal/tests.
+    function _parseCreationCode(bytes calldata vaultData) internal pure returns (bytes memory creationCode) {
+        if (vaultData.length == 0) return vaultData;
+
+        if (_looksAbiEncodedBytes(vaultData)) {
+            return abi.decode(vaultData, (bytes));
+        }
+
+        return vaultData;
+    }
+
+    function _looksAbiEncodedBytes(bytes calldata data) internal pure returns (bool) {
+        if (data.length < 64) return false;
+
+        uint256 offset;
+        uint256 len;
+        assembly {
+            offset := calldataload(data.offset)
+            len := calldataload(add(data.offset, 32))
+        }
+
+        if (offset != 32 || len == 0) return false;
+
+        uint256 padded = ((len + 31) / 32) * 32;
+        return data.length == 64 + padded;
     }
 
     function isQuoteTokenSupported(address quoteToken) external pure override returns (bool supported) {
@@ -71,11 +138,15 @@ contract CodegenVaultFactory is VaultFactoryBaseV2 {
         return (true, "");
     }
 
-    function vaultDataSchema() public pure override returns (VaultDataSchema memory schema) {
-        schema.description =
-            unicode"CodegenVaultFactory — deploys an AI-generated vault. vaultData is the contract creation bytecode produced by Origin Vault AI Studio. UNAUDITED generated code: testnet / audit-gated.";
-        schema.fields = new FieldDescriptor[](1);
-        schema.fields[0] = FieldDescriptor("creationCode", "bytes", "Compiled creation bytecode of the generated vault", 0);
+    function vaultDataSchema() public view override returns (VaultDataSchema memory schema) {
+        string memory desc = _registeredDescription[msg.sender];
+        if (bytes(desc).length > 0) {
+            schema.description = desc;
+        } else {
+            schema.description =
+                unicode"Custom tax vault — register your vault on-chain first, then launch with token name and tax only. UNAUDITED: testnet.";
+        }
+        schema.fields = new FieldDescriptor[](0);
         schema.isArray = false;
     }
 }
