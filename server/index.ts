@@ -1,11 +1,25 @@
 import dotenv from "dotenv";
-// Load .env.local first (developer secrets, gitignored), then .env as fallback.
-dotenv.config({ path: ".env.local" });
+// .env.local must win over a stale OPENAI_API_KEY in the shell (common dev pitfall).
+dotenv.config({ path: ".env.local", override: true });
 dotenv.config();
 import cors from "cors";
 import express from "express";
-import { generateVaultCode, generateVaultCodeStream, generateVaultCodeRefineStream, type RefineSession } from "./codegen.js";
+import {
+  generateVaultCode,
+  generateVaultCodeStream,
+  generateVaultCodeRefineStream,
+  type RefineSession,
+  type ApproximationConsent,
+} from "./codegen.js";
+
+/** Phase 6: explicit approximation consent — only the two known choices are accepted. */
+function parseConsent(value: unknown): ApproximationConsent | undefined {
+  return value === "closest_draft" || value === "spec_only" ? value : undefined;
+}
 import { runSpecAudit } from "./spec-audit.js";
+import { resolveOpenAiModel } from "./openai-model.js";
+import { createChatRouter } from "./chat-routes.js";
+import { isSupabaseConfigured } from "./supabase.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 3002);
@@ -44,9 +58,13 @@ app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     aiMode: process.env.OPENAI_API_KEY ? "openai" : "stub",
-    model: process.env.OPENAI_MODEL ?? "gpt-4o",
+    model: resolveOpenAiModel(),
+    chatStorage: isSupabaseConfigured() ? "supabase" : "memory",
   });
 });
+
+// Chat history + generation runs (Supabase-backed when configured, in-memory otherwise).
+app.use(createChatRouter());
 
 app.post("/api/codegen-vault", async (req, res) => {
   try {
@@ -61,9 +79,9 @@ app.post("/api/codegen-vault", async (req, res) => {
     }
 
     const apiKey = process.env.OPENAI_API_KEY;
-    const model = process.env.OPENAI_MODEL ?? "gpt-4o";
+    const model = resolveOpenAiModel();
 
-    const result = await generateVaultCode(prompt, apiKey, model);
+    const result = await generateVaultCode(prompt, apiKey, model, parseConsent(req.body?.approximationConsent));
     res.json(result);
   } catch (err) {
     console.error("codegen failed:", err);
@@ -90,8 +108,8 @@ app.post("/api/codegen-vault-stream", async (req, res) => {
 
   try {
     const apiKey = process.env.OPENAI_API_KEY;
-    const model = process.env.OPENAI_MODEL ?? "gpt-4o";
-    await generateVaultCodeStream(prompt, apiKey, model, send);
+    const model = resolveOpenAiModel();
+    await generateVaultCodeStream(prompt, apiKey, model, send, parseConsent(req.body?.approximationConsent));
   } catch (err) {
     console.error("codegen stream failed:", err);
     send({ type: "error", error: err instanceof Error ? err.message : "Codegen failed" });
@@ -129,7 +147,7 @@ app.post("/api/codegen-vault-refine-stream", async (req, res) => {
 
   try {
     const apiKey = process.env.OPENAI_API_KEY;
-    const model = process.env.OPENAI_MODEL ?? "gpt-4o";
+    const model = resolveOpenAiModel();
     await generateVaultCodeRefineStream(message, session, apiKey, model, send);
   } catch (err) {
     console.error("codegen refine stream failed:", err);
@@ -148,7 +166,7 @@ app.post("/api/spec-audit", async (req, res) => {
       return;
     }
     const apiKey = process.env.OPENAI_API_KEY;
-    const model = process.env.OPENAI_MODEL ?? "gpt-4o";
+    const model = resolveOpenAiModel();
     const audit = await runSpecAudit(source, contractName, apiKey, model, { compiled: true });
     res.json(audit);
   } catch (err) {

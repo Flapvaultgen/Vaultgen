@@ -8,6 +8,7 @@ dotenv.config();
 import { writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { generateVaultCode, scanSafety, scanVaultLogic } from "./codegen.ts";
+import { resolveOpenAiModel } from "./openai-model.js";
 
 const OUT = path.join(import.meta.dirname, "verify-runs");
 
@@ -37,7 +38,7 @@ function extractChild(source: string, name: string): string {
 await mkdir(OUT, { recursive: true });
 
 const apiKey = process.env.OPENAI_API_KEY;
-const model = process.env.OPENAI_MODEL ?? "gpt-4o";
+const model = resolveOpenAiModel();
 let anyFail = false;
 
 for (const p of PROMPTS) {

@@ -5,18 +5,66 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { runSpecAudit, type SpecAuditResult } from "./spec-audit.js";
-import { generateIntegrationTest, runIntegrationTests } from "./test-gen.js";
 import {
-  classifyVaultPlan,
-  expandMechanicDesign,
-  buildVaultPlanPromptAppendix,
-  getVaultKindInvariants,
-  inferVaultPlanFromPrompt,
-  isStakingPlan,
-  isLotteryPlan,
-  type VaultPlan,
-} from "./vault-plan.js";
+  generateIntegrationTest,
+  runIntegrationTests,
+  buildSimulationReport,
+  type SimulationReport,
+  type SimulationScenarioResult,
+  type TestJourney,
+} from "./test-gen.js";
+// Phase 6: VaultPlan is a retired taxonomy — imported as a TYPE ONLY for the
+// deprecated, ignored optional parameters on scanner APIs.
+import type { VaultPlan } from "./vault-plan.js";
+import {
+  classifyVaultScope,
+  inferVaultScopeFromPrompt,
+  consentGate,
+  buildApproximationReport,
+  type VaultScope,
+  type ApproximationConsent,
+  type ApproximationReport,
+} from "./vault-scope.js";
+import {
+  planMechanicSpec,
+  inferMechanicSpecFromPrompt,
+  formatMechanicSpecForPrompt,
+  summarizeMechanicSpec,
+  type MechanicSpec,
+} from "./mechanic-spec.js";
 import { scanMechanicCompleteness } from "./mechanic-completeness.js";
+import {
+  designQuestionGate,
+  applyConservativeLifecycleDefaults,
+  type DesignQuestion,
+} from "./design-questions.js";
+import { runEconomicCriticPass, type EconomicCriticReport } from "./economic-critic.js";
+import {
+  MAX_CRITIC_REPAIR_ATTEMPTS,
+  buildCriticRepairPrompt,
+  repairReason,
+  selectRepairFindings,
+  shouldTriggerCriticRepair,
+  summarizeRemainingIssues,
+  type RepairAttempt,
+} from "./critic-repair.js";
+import { resolveCheapModel, resolveEscalationModel } from "./openai-model.js";
+import { generateVaultUi, type VaultUiArtifact } from "./ui-gen.js";
+import {
+  extractJsonPayload,
+  createAiUsageTotals,
+  runWithAiUsage,
+  type AiChatClient,
+  type AiUsageTotals,
+} from "./ai-client.js";
+import { createHash } from "node:crypto";
+import {
+  formatConstitutionForPrompt,
+  formatRuleFixGuidance,
+  formatRuleLabel,
+  groupFindingsByRule,
+  mapScannerFindingToRuleId,
+} from "./constitution.js";
 
 const execAsync = promisify(exec);
 
@@ -40,9 +88,12 @@ export type SafetyFinding = {
 
 export type ScanSafetyOptions = {
   sourceScope?: "child" | "full-injected";
+  /** @deprecated Phase 6: accepted for API compatibility, never consulted. */
   vaultPlan?: VaultPlan;
   childSource?: string;
   fullSourceOnly?: boolean;
+  /** Phase 7: feeds economic-correctness scanners (winner-takes-all / per-user accounting semantics). */
+  mechanicSpec?: MechanicSpec;
 };
 
 export type FixLogEntry = {
@@ -54,7 +105,8 @@ export type FixLogEntry = {
     | "test_fix"
     | "spec_fix"
     | "generating_tests"
-    | "auditing";
+    | "auditing"
+    | "critic_repair";
   attempt: number;
   rule?: string;
   message: string;
@@ -68,21 +120,53 @@ export type CodegenResult = {
   compileErrors: string;
   safety: { level: SafetyLevel; findings: SafetyFinding[] };
   specAudit: SpecAuditResult;
-  vaultPlan: VaultPlan;
+  /** THE plan object — the authoritative mechanic plan (Phase 2; primary since Phase 6). */
+  mechanicSpec: MechanicSpec;
+  /** Launch-readiness verdict (Phase 6 Draft/Launch model). */
+  scope?: VaultScope;
+  /** What this result is in the draft/launch flow (Phase 6; Phase 8 adds design_questions). */
+  deliverable: "contract" | "spec_only" | "consent_required" | "refused_unsafe" | "design_questions";
+  /** Honest preserved/dropped record when the user consented to a closest-draft approximation. */
+  approximation: ApproximationReport | null;
+  /** Phase 8: open plain-English design questions (critical ones pause generation until answered/consented). */
+  designQuestions: DesignQuestion[];
+  /** Phase 8: plain-English record of conservative defaults chosen on the user's behalf (after explicit consent). */
+  designDecisions: string[];
   abi: unknown[] | null;
   creationBytecode: string | null;
   bytecodeSize: number | null;
+  /** Deployed (runtime) bytecode size in bytes — must stay ≤24,576 (EIP-170) or CREATE2 will always fail. */
+  deployedBytecodeSize: number | null;
   attempts: number;
   integrationTestPath: string | null;
   integrationTestsPassed: boolean;
+  /** Structured Rule 006 fork-simulation results (Phase 5) — scenario × rule × pass/fail. */
+  simulationReport: SimulationReport | null;
+  /** Phase 7: advisory economic-correctness critic report — never overrides deterministic scanners. */
+  economicCritique: EconomicCriticReport | null;
+  /** Cleanup pass: bounded automatic repair attempts triggered by serious critic findings (+ test failures). */
+  repairAttempts: RepairAttempt[];
   fixLog: FixLogEntry[];
   autoFixExhausted: boolean;
+  /**
+   * AI-generated bespoke UI for this vault in Flap's official component
+   * template format (Component.tsx + VaultABI.ts + i18n.json + manifest.json,
+   * plus esbuild-compiled JS). Rendered sandboxed on our site immediately and
+   * downloadable for Flap Artifact Workbench submission. Advisory — null when
+   * the pass failed or was skipped.
+   */
+  uiArtifact: VaultUiArtifact | null;
   mode: "openai" | "stub";
+  /** Per-run AI token usage + estimated cost (null for stubs/legacy records). */
+  tokenUsage: AiUsageTotals | null;
 };
 
 const MAX_PIPELINE_ATTEMPTS = 12;
 const MAX_TEST_FIX_ATTEMPTS = 8;
 const MAX_TOTAL_ATTEMPTS = MAX_PIPELINE_ATTEMPTS + MAX_TEST_FIX_ATTEMPTS;
+
+/** Output cap for full-contract generations — a vault + schema comfortably fits. */
+const CODEGEN_MAX_OUTPUT_TOKENS = 32_000;
 
 // ── Injected preamble: imports + an abstract base that supplies all the
 //    error-prone boilerplate so the AI only writes the mechanic. ─────────────
@@ -201,17 +285,38 @@ RULE 009 — EMERGENCY CONTROLS (non-upgradeable studio vaults):
   user explicitly opts out of Rule 009 compatibility.
 - NEVER make creator/manager able to call emergency functions. NEVER add amount params or hardcode recipient.
 - DO NOT generate "excess-only" emergency withdrawals for Flap spec compliance — that diverges from Rule 009.
-- Staking vaults: inherited Guardian CAN drain all staked taxToken and reward BNB by design. Disclose this
-  trust model in description() and vaultUISchema.description (e.g. "Guardian emergency recovery per Flap Rule 009").
-  For production staking, recommend upgradeable beacon pattern (no emergency drain functions).
+- Vaults that custody user-deposited tokens or user-claimable BNB: the inherited Guardian CAN drain all of it
+  by design. Disclose this trust model in description() and vaultUISchema.description
+  (e.g. "Guardian emergency recovery per Flap Rule 009"). For production vaults that custody user funds,
+  recommend the upgradeable beacon pattern (no emergency drain functions).
 `;
 
-const CODEGEN_RULES = `You are Flap Vault Gen — you write a COMPLETE, correct, original Solidity contract for a
-single Flap tax vault that performs EXACTLY the mechanic the user describes. You are not limited to
-a fixed menu; design whatever on-chain logic fits. The contract is compiled with solc 0.8.26 and
-REJECTED on any error, so be precise.
+// Phase 3: CODEGEN_RULES is spec-first and constitution-driven. It must contain
+// NO vault-archetype reference implementations and no fixed mechanic vocabulary
+// (jackpot/drawSnapshot/accRewardPerShare/…). Rule text comes from
+// constitution.ts (formatConstitutionForPrompt) — do not duplicate it here.
+// Scanner-required naming patterns for kind-classified prompts live ONLY in the
+// transitional VaultPlan appendix (vault-plan.ts KIND_INVARIANTS) until the
+// scanners are re-gated on source structure in Phase 4.
+const CODEGEN_RULES = `You are Flap Vault Gen — you implement the user's MechanicSpec as a COMPLETE, correct, original
+Solidity contract for a single Flap tax vault. There is NO menu of vault types and NO archetype to
+choose from: the MechanicSpec in the user message is the AUTHORITATIVE product plan (actors, buckets,
+named actions, payout rules, UI methods, ruleAnalysis, testScenarios). Preserve the user's mechanic —
+do not silently approximate it into a different product. Use the spec's free-form action and bucket
+names where they are valid Solidity identifiers. Any VaultPlan/vault-kind block appended after these
+rules is transitional compatibility context only — where it conflicts with the MechanicSpec, the
+MechanicSpec wins. The contract is compiled with solc 0.8.26 and REJECTED on any error, so be precise.
+
+LANGUAGE: the user's prompt may be written in English, Simplified Chinese, or a mix of both — read and
+understand either fluently. Solidity identifiers, comments, and code must always stay in English (required
+by the compiler and tooling), but the natural-language "explanation"/"EXPLANATION" you return must mirror
+the user's language: if their prompt is primarily Simplified Chinese, write the explanation in Simplified
+Chinese; otherwise write it in English. require()/revert strings inside the contract stay bilingual
+English/Chinese either way (Rule 004) — that is a fixed UI requirement, not a language mirror.
 
 ${FLAP_V2_ARCHITECTURE}
+
+${formatConstitutionForPrompt()}
 
 WHAT IS ALREADY PROVIDED (do NOT write any of this — it is injected and in scope):
 - SPDX line, pragma, and all imports.
@@ -235,35 +340,35 @@ WHAT IS ALREADY PROVIDED (do NOT write any of this — it is injected and in sco
 
 HARD REQUIREMENTS:
 1. Define EXACTLY ONE contract: contract <PascalCaseName> is CodegenVaultBase { ... }.
-2. Include the pass-through constructor (required). You MAY add ONE initialization line for round
-   timers in the same constructor body (nothing else), e.g. lastDrawTime = block.timestamp; for weekly
-   lotteries. Do NOT redeclare taxToken/creator/factory/BURN_ADDRESS:
+2. Include the pass-through constructor (required). You MAY add ONE initialization line for interval
+   timer state in the same constructor body (nothing else) when the MechanicSpec has scheduled or
+   interval-gated actions. Do NOT redeclare taxToken/creator/factory/BURN_ADDRESS:
        constructor(address _taxToken, address _creator, address _factory)
            CodegenVaultBase(_taxToken, _creator, _factory)
        {
-           lastDrawTime = block.timestamp; // optional — timed lottery/epoch vaults only
+           lastExecutionTime = block.timestamp; // optional — interval-gated mechanics only
        }
 3. Implement receive() external payable and keep it CHEAP: pure accounting only (update storage
    counters/budgets). NO external calls, swaps, transfers, or loops in receive(). It must never
    revert on a normal deposit (do NOT require(msg.value > 0) — just return early if zero).
-4. FULLY implement the mechanic with every function and payout path it needs — never half-built.
-   - staking -> stake/unstake/claim with correct accrual accounting (e.g. accRewardPerShare scaled
-     by 1e18). Track each user's staked balance and reward debt.
-   - lottery/raffle -> keep an address[] of entrants, draw by indexing into THAT array
-     (idx = rand % entrants.length), then pay. NEVER iterate address(i) — it is meaningless.
-   - buyback -> call the inherited _buyAndBurn(amount, minOut). Do NOT hand-roll the swap.
+4. FULLY implement every action, bucket, payout rule, and view named in the MechanicSpec — never
+   half-built. Every lifecycle edge must be wired end-to-end: whatever a user can trigger must have a
+   complete effect path, and whatever the spec says gets credited must actually be credited by some
+   function. If the mechanic buys and burns the tax token, call the inherited
+   _buyAndBurn(amount, minOut) — do NOT hand-roll the swap. If the mechanic selects among
+   participants, index into a real address[] you maintain — NEVER iterate address(i).
 5. Use the onlyManager modifier on privileged/admin functions. Guard any function that sends BNB
    or calls the Portal with nonReentrant.
 6. Override description() public view returns (string memory).
 7. Override vaultUISchema() public pure returns (VaultUISchema memory schema) — see exact rules below.
 8. Compute a payout amount BEFORE zeroing its source (never set x = 0 then send x).
-9. Randomness wording — do NOT overclaim security:
-   - FlapAIConsumerBase draws: describe as "external AI provider selection" / "Flap AI oracle callback" — NOT
+9. Randomness wording — do NOT overclaim security (Rules 004/007):
+   - Flap AI oracle outcomes: describe as "external AI provider selection" / "Flap AI oracle callback" — NOT
      "secure random", "cryptographically secure", or "verifiable randomness" unless you use a VRF/proof-backed source.
-   - block.prevrandao / blockhash: FORBIDDEN for outcomes (R4). If ever mentioned in docs, call it "on-chain entropy"
-     and disclose it is manager-influencable — do not use it for winner picks.
-   - ANY lottery, raffle, survivor pick, or random winner MUST use FlapAIConsumerBase (R1) for the outcome.
-     NEVER use block.prevrandao, blockhash, or block.timestamp % n for winner/elimination selection.
+   - block.prevrandao / blockhash: FORBIDDEN for outcomes. If ever mentioned in docs, call it "on-chain entropy"
+     and disclose it is manager-influencable — do not use it to select outcomes.
+   - ANY random or chance-based selection among participants MUST use FlapAIConsumerBase (see the
+     ORACLE OUTCOMES section) — NEVER block.prevrandao, blockhash, or block.timestamp % n.
 10. NEVER use selfdestruct, delegatecall, or tx.origin. Do not deploy other contracts.
 11. NEVER define or use custom errors (Flap UI-01). EVERY revert must be require(cond, "literal
     string") — the UI cannot decode custom error selectors. Prefer unicode"English / 中文" messages.
@@ -271,64 +376,39 @@ HARD REQUIREMENTS:
     the raw bool return of transfer/transferFrom.
 13. NEVER emit a stub, placeholder, TODO/FIXME, "implement this later", or a function that returns
     fake/empty data. Every function must be fully and correctly implemented.
-14. NO HALF-IMPLEMENTED MECHANICS (novel vaults): if you add register*() AND claim*(), advance/distribute
-    MUST credit claimableRewards[user] += share. If milestone-only burn with no user rewards, do NOT add
-    register/claim/claimableRewards at all. Every external user write MUST appear in vaultUISchema.methods.
-    milestoneIndex + milestoneTargets[] MUST bounds-check before indexing.
+14. NO HALF-IMPLEMENTED MECHANICS: if users can claim, some function MUST credit the claimable
+    mapping (mapping[user] += share) before claim reads it. If users can register/enroll, something
+    MUST consume that registration. If the spec has no user payouts, do NOT add claim paths at all.
+    Every external user write MUST appear in vaultUISchema.methods. Any index into a storage array
+    MUST be bounds-checked (require(i < arr.length)) before use.
 15. If the mechanic needs data that does NOT exist on-chain (e.g. ranking ALL token holders, an
-    off-chain price, a "top N holders" list — the vault CANNOT enumerate ERC20 holders), do NOT fake
+    off-chain price, an external result — the vault CANNOT enumerate ERC20 holders), do NOT fake
     it. Instead accept it as input to an onlyManager keeper function, e.g.
-        function executeAirdrop(address[] calldata winners, uint256[] calldata amounts)
-            external onlyManager nonReentrant { ... validate sums against the pool, then pay ... }
+        function applyKeeperData(address[] calldata recipients, uint256[] calldata amounts)
+            external onlyManager nonReentrant { ... validate sums against the funding bucket, then credit ... }
     and state the off-chain/keeper trust assumption in the explanation. Validate inputs on-chain
-    (array lengths match, total <= pool) so the keeper cannot over-pay.
+    (array lengths match, total <= bucket) so the keeper cannot over-pay.
 
 FLAP PROTOCOL FUND-FLOW RULES (these are how tax actually flows — violating them produces a
 broken or unsafe vault even if it compiles):
 A. receive() is called by the Flap tax processor on every tax event with plain BNB. Inside
    receive(), msg.sender is the PROTOCOL, NOT a holder/buyer. NEVER attribute a deposit to
    msg.sender, NEVER push msg.sender as a participant, NEVER index user state by msg.sender in
-   receive(). receive() may ONLY do cheap accounting: split msg.value into named storage buckets
-   (e.g. buybackBudget, jackpot, rewardPool, treasury). It MUST NOT call _buyAndBurn, _sendNative,
+   receive(). receive() may ONLY do cheap accounting: split msg.value into the named storage buckets
+   from the MechanicSpec. It MUST NOT call _buyAndBurn, _sendNative,
    transfer, swap, any external call, or any loop. (Hard protocol cap: receive() <= 1,000,000 gas.)
-B. Buyback/burn runs in a SEPARATE function, e.g.:
-       function executeBuyback(uint256 minTokensOut) external onlyManager nonReentrant {
-           uint256 amt = buybackBudget; require(amt > 0, "none"); buybackBudget = 0;
-           _buyAndBurn(amt, minTokensOut);     // pass a REAL minOut for slippage, never 0 in prod
-       }
-C. Per-holder logic happens in user-called functions (enter/stake/claim/draw), where msg.sender IS
-   the real user. You MAY read IERC20(taxToken).balanceOf(msg.sender) ONLY as a boolean minimum-hold
-   gate (e.g. require(balance >= 1e18) to enter()) — NEVER to compute a payout amount or pro-rata share.
-   NEVER size a payout/dividend from a live balanceOf — it is flash-loan/MEV gameable (Rule 003).
-D. If you STAKE real tokens, you MUST pull them: IERC20(taxToken).transferFrom(msg.sender,
-   address(this), amount) (the UI approves via an ApproveAction). Reward accrual MUST be a correct
-   accRewardPerShare model: when reward BNB is added, accRewardPerShare += added * 1e18 / totalStaked;
-   pending = user.amount * accRewardPerShare / 1e18 - user.rewardDebt. Do NOT invent ad-hoc formulas.
-
-STAKING (accRewardPerShare) — reference pattern the scanner enforces:
-- struct UserInfo { uint256 amount; uint256 rewardDebt; }
-- uint256 public constant REWARD_PRECISION = 1e18;
-- receive(): if totalStaked == 0, undistributedRewards += msg.value (single undistributed bucket).
-  if totalStaked > 0, accRewardPerShare += msg.value * REWARD_PRECISION / totalStaked.
-  NEVER mix accRewardPerShare += in receive with rewardPool -= on payout — pick ONE model.
-- pendingReward(user): use accRewardPerShare only — do NOT include undistributedRewards unless claimReward also distributes it.
-- stake(): require(amount > 0). Claim or preserve pending BEFORE changing user.amount.
-  If undistributedRewards > 0, roll BEFORE increasing totalStaked using denominator (totalStaked + received).
-- claimReward(): compute pending, pay _sendNative, update rewardDebt — do NOT call an internal
-  harvest helper that also pays (no double-harvest). Do NOT auto-pay inside stake() if claimReward exists.
-- Add pendingReward(address user) external view — MUST also appear in vaultUISchema.methods.
-- Pay rewards from contract BNB balance — never rewardPool -= pending unless ALL tax went into rewardPool only.
-- taxToken is a Flap tax token and MAY be fee-on-transfer — ALWAYS credit stake using balance delta:
-      uint256 beforeBal = IERC20(taxToken).balanceOf(address(this));
-      IERC20(taxToken).safeTransferFrom(msg.sender, address(this), amount);
-      uint256 received = IERC20(taxToken).balanceOf(address(this)) - beforeBal;
-      require(received > 0, unicode"No tokens received / 未收到代币");
-      user.amount += received; totalStaked += received;
-- Document in description() what happens to BNB when totalStaked == 0 (pendingRewards bucket).
-- DO NOT override emergencyWithdrawNative/Token — inherit Rule 009 Guardian full-drain from base;
-  disclose Guardian trust in description/schema for staking vaults.
-E. NEVER pay out address(this).balance. Pay each winner/claimant from the SPECIFIC bucket that
-   funds it (e.g. send jackpot, then jackpot = 0). BNB in must equal BNB out across buckets.
+B. Anything that spends a bucket (swap/burn via _buyAndBurn, payouts, oracle fees) runs in a
+   SEPARATE user- or manager-called function: read the bucket, require it is non-zero, zero/decrement
+   it FIRST, then act. Swaps MUST take a real minTokensOut slippage parameter — never hardcode 0 in prod.
+C. Per-holder logic happens in user-called functions (the actions named in the MechanicSpec), where
+   msg.sender IS the real user. You MAY read IERC20(taxToken).balanceOf(msg.sender) ONLY as a boolean
+   minimum-hold gate (e.g. require(balance >= 1e18) to join) — NEVER to compute a payout amount or
+   pro-rata share. NEVER size a payout/dividend from a live balanceOf — it is flash-loan/MEV gameable (Rule 003).
+D. If users deposit/commit real tokens, you MUST pull them with
+   IERC20(taxToken).safeTransferFrom(msg.sender, address(this), amount) (the UI approves via an
+   ApproveAction in the schema) and track each user's committed balance in explicit vault accounting.
+E. NEVER pay out address(this).balance. Pay each claimant from the SPECIFIC bucket that
+   funds it (read the bucket, zero/decrement it, then send). BNB in must equal BNB out across buckets.
 F. CodegenVaultBase provides Rule 009 emergency functions (onlyGuardian, full balance). Do NOT override
    them for "excess-only" accounting unless the user explicitly opts out of Rule 009 compatibility.
 G. Fairness (Rule 003): no privileged role may sandwich or systematically out-compete users.
@@ -338,14 +418,14 @@ PRODUCTION QUALITY BAR (match FreeCoin.sol / Flap reference vaults — incomplet
 - EVERY external function that sends BNB (_sendNative, _buyAndBurn, .call{value:}) MUST use nonReentrant.
 - EVERY payout with an address recipient param MUST require(to != address(0), unicode"...").
 - NEVER use silent try/catch {} — handle failures explicitly with require.
-- Emit events for every meaningful state change (deposits split, buyback, withdraw, enter, payout).
+- Emit events for every meaningful state change (bucket splits, deposits, withdrawals, joins, payouts).
 - vaultUISchema MUST be COMPLETE for every method entry (see below) — partial schemas break the Flap UI.
 - Include VIEW methods in vaultUISchema for every public state var the user cares about
-  (e.g. buybackBudget, treasury, totalStaked, jackpot) so the UI can display live values.
+  (bucket totals, per-user balances, claimable amounts, counters) so the UI can display live values.
 - MANDATORY: EVERY uint256 public / bool public / address public in the child contract
   (except taxToken/creator/factory from base) MUST appear as a view method in vaultUISchema.methods
   with the SAME name — scan rejects missing ones (public-state-not-in-uischema).
-- stake()/unstake() that use transferFrom MUST include ApproveAction on taxToken in vaultUISchema.
+- ANY method that pulls tokens via transferFrom MUST include ApproveAction on taxToken in vaultUISchema.
 
 UI SCHEMA (vaultUISchema) — common AI mistakes to AVOID:
 - schema.methods[] is ONLY for user-callable write methods AND custom view helpers — NEVER list
@@ -354,187 +434,143 @@ UI SCHEMA (vaultUISchema) — common AI mistakes to AVOID:
   inputs = new FieldDescriptor[](N), outputs = new FieldDescriptor[](M), approvals = new ApproveAction[](K).
   Even when N/M/K is 0, still assign the empty arrays — omitting outputs/approvals breaks the UI.
 - Each write method needs isWriteMethod = true and accurate inputs/outputs FieldDescriptor arrays.
-- For stake/unstake with transferFrom, set approvals[0] = ApproveAction("taxToken", "amount").
+- For any method that pulls tokens with transferFrom, set approvals[0] = ApproveAction("taxToken", "amount").
   ApproveAction has ONLY two positional string args (tokenType, amountFieldName) — NEVER use
   named braces like ApproveAction({token: taxToken, ...}) and NEVER reference the taxToken variable
   inside vaultUISchema (it is pure — use the literal string "taxToken").
 
 EVENTS — emit for every meaningful state change (helps auditability):
-- e.g. event BudgetUpdated(string bucket, uint256 amount); event Entered(address user);
-  event BuybackExecuted(uint256 bnbIn, uint256 tokensBought); // name fields to match emitted values
-  event WinnerPaid(address winner, uint256 prize);
+- e.g. event BucketFunded(string bucket, uint256 amount); event Joined(address user);
+  event ActionExecuted(uint256 amountIn, uint256 amountOut); // name fields to match emitted values
+  event PayoutCredited(address recipient, uint256 amount);
+- Derive event names from the MechanicSpec's action names where possible.
 
-LOTTERY / RAFFLE (any entrants[] + draw) — timing, caps, oracle randomness:
-- enter() MUST NOT gate on weekly/round timers (lastDrawTime + 1 weeks, etc.) — that locks the first
-  round or blocks entry incorrectly. Enforce cadence ONLY on requestDraw() (not enter).
-- If using lastDrawTime / roundStart, initialize it in constructor: lastDrawTime = block.timestamp;
-- Cap entrants: MAX_ENTRANTS <= 255 and require(entrants.length < MAX_ENTRANTS) in enter() — draw loops
-  must not be unbounded (gas DoS).
-- Winner selection MUST use FlapAIConsumerBase requestDraw() + _fulfillReasoning (R1) — NEVER
-  drawWinner() with block.prevrandao / blockhash. There is no on-chain VRF shortcut on Flap.
-- For real jackpots and demo lotteries alike: inherit FlapAIConsumerBase, snapshot entrants, AI pick.
-- Prefer mapping(address => uint256) claimablePrize + claim() for large winner payouts (pull payment).
-- Reset hasEntered[] BEFORE delete entrants; loop snapshot or entrants copy, never loop after delete.
+SCHEMA INTEGRITY — MANDATORY rule (enforced by safety scanner):
+- Every string listed in schema.methods[i].name MUST correspond to an ACTUAL function or public
+  state variable in the contract. Do NOT list functions in the schema that you forgot to implement.
+  The Flap UI calls each schema method and will revert visibly if the function does not exist.
+- Every view method in vaultUISchema that reads a derived/computed value MUST be a real
+  function — never list a computed view without implementing it.
 
-BUCKET ACCOUNTING — when using named buckets (buybackBudget, treasury, jackpot, rewardPool):
+BUCKET ACCOUNTING — when using the named buckets from the MechanicSpec:
 - receive() ONLY increments buckets. Every spend MUST decrement the specific bucket first, then pay.
 - Tracked native buckets MUST stay solvent: sum(buckets) must never exceed address(this).balance.
-- NEVER pay AI oracle fees or jackpots from undifferentiated address(this).balance while bucket counters
-  still show funds — deduct from the correct bucket (e.g. jackpot -= fee before p.reason{value: fee}).
+- NEVER pay oracle fees or payouts from undifferentiated address(this).balance while bucket counters
+  still show funds — deduct from the correct bucket before the external call.
 - NEVER use require(address(this).balance >= X) for bucket-funded actions without syncing buckets.
 
-LOTTERY + AI (FlapAIConsumerBase) — MANDATORY patterns:
-- Snapshot: at requestDraw(), copy entrants to address[] drawSnapshot and use ONLY drawSnapshot in
-  _fulfillReasoning — never index live entrants[] after the oracle request (entrant set must be frozen).
-- Dedup: enter() MUST guard with mapping(address => bool) hasEntered or equivalent — no duplicate pushes.
-- Freeze: enter() MUST require(pendingRequestId == 0, "...") so no one joins mid-draw.
-There is NO Chainlink VRF on Flap. For ANY winner selection / random outcome with real value at
-stake, DO NOT use block.prevrandao (the manager can read it in-tx and only call when they win).
-Instead use the FlapAIProvider, a commit-and-reveal oracle (VRF-like) whose callback is authenticated.
+CONDITIONAL GUIDANCE — apply ONLY the sections the MechanicSpec actually needs. Check its actions,
+oracleActions, scheduledActions, payoutRules, fundsIn, and ruleAnalysis; do not add machinery the
+spec does not ask for.
 
-R1. Random winner / AI-decided outcome via FlapAIProvider:
-   - The provider address is _getFlapAIProvider() (inherited from FlapAIConsumerBase). NEVER use
-     _getPortal() or _getFlapTriggerService() for the AI provider — they are different contracts.
-   - Also inherit FlapAIConsumerBase:  contract X is CodegenVaultBase, FlapAIConsumerBase { ... }
-   - Add: uint256 public pendingRequestId; uint256 public aiModelId; and a setter
-       function setAiModel(uint256 id) external onlyManager { aiModelId = id; }
-   - To start a draw (snapshot entrants FIRST so the set is fixed before the choice is known):
-       function requestDraw() external onlyManager nonReentrant {
-           require(pendingRequestId == 0, "Draw pending");
-           delete drawSnapshot;
-           for (uint256 i = 0; i < entrants.length; i++) drawSnapshot.push(entrants[i]);
-           uint256 n = drawSnapshot.length; // NEVER loop drawSnapshot.length right after delete — it is 0
-           require(n > 0 && n <= 255, "Bad entrant count");
-           IFlapAIProvider p = IFlapAIProvider(_getFlapAIProvider());
-           uint256 fee = p.getModel(aiModelId).price;
-           require(jackpot > fee, unicode"Prize too small after fee / 扣费后奖池太小"); // NEVER jackpot >= fee — winner gets 0
-           // Optional: uint256 public constant MIN_PRIZE = 0.01 ether;
-           // require(jackpot > fee + MIN_PRIZE, unicode"Prize too small / 奖池太小");
-           jackpot -= fee;
-           lastDrawFee = fee;
-           pendingRequestId = p.reason{value: fee}(aiModelId,
-               "Pick one integer uniformly at random in [0, n-1] to choose a lottery winner.", uint8(n));
-           emit DrawRequested(pendingRequestId, n, fee);
-       }
-   - REQUIRED events for AI lotteries:
-       event DrawRequested(uint256 indexed requestId, uint256 entrantCount, uint256 fee);
-       event DrawRefunded(uint256 indexed requestId, uint256 fee);
-       event AiModelUpdated(uint256 indexed modelId);
-     setAiModel MUST emit AiModelUpdated(id). Refund MUST emit DrawRefunded(requestId, lastDrawFee).
-   - In _fulfillReasoning use drawSnapshot[choice], NOT entrants[choice].
-   - Reset hasEntered for every drawSnapshot address BEFORE delete entrants (loop drawSnapshot first).
-   - Set lastDrawTime = block.timestamp after a successful draw payout.
-   - Clear lastDrawFee = 0 after successful fulfillment.
-   - Store draw fee in lastDrawFee at requestDraw; restore jackpot += lastDrawFee in _onFlapAIRequestRefunded.
-   - On refund: emit DrawRefunded; clear pendingRequestId; restore fee bucket; delete drawSnapshot; clear lastDrawFee.
-   - Before uint8(n) cast: require(n > 0 && n <= 255, "...") or require(n <= type(uint8).max, "...").
-   - requestDraw() MUST require(pendingRequestId == 0) — block overlapping async requests.
-   - Implement the THREE required overrides (callback auth is handled by the base's
-     onlyFlapAIProvider — do NOT write your own public fulfillReasoning):
-       mapping(address => uint256) public claimablePrize;
-       function _fulfillReasoning(uint256 requestId, uint8 choice) internal override {
-           require(requestId == pendingRequestId, "Stale request");
-           pendingRequestId = 0;
-           require(drawSnapshot.length > 0 && choice < drawSnapshot.length, "Bad choice");
-           address winner = drawSnapshot[choice];
-           uint256 prize = jackpot; jackpot = 0;
-           for (uint256 i = 0; i < drawSnapshot.length; i++) hasEntered[drawSnapshot[i]] = false;
-           delete drawSnapshot;
-           delete entrants;
-           claimablePrize[winner] += prize; // pull payment — never _sendNative(winner) here (contract winners brick the draw)
-           lastDrawTime = block.timestamp;
-           lastDrawFee = 0;
-           emit WinnerPaid(winner, prize);
-       }
-       function claimPrize() external nonReentrant {
-           uint256 amt = claimablePrize[msg.sender];
-           require(amt > 0, unicode"No prize / 无奖金");
-           claimablePrize[msg.sender] = 0;
-           _sendNative(msg.sender, amt);
-       }
-       function _onFlapAIRequestRefunded(uint256 requestId) internal override {
-           if (requestId == pendingRequestId) {
-               emit DrawRefunded(requestId, lastDrawFee);
-               pendingRequestId = 0;
-               jackpot += lastDrawFee;
-               lastDrawFee = 0;
-               delete drawSnapshot;
-           }
-       }
-       function lastRequestId() public view override returns (uint256) { return pendingRequestId; }
-   - The callback runs under a HARD 2,000,000 gas cap: NO unbounded loops / heavy external calls in
-     it, and it must never revert-lock (always clear pendingRequestId first).
+IF USERS DEPOSIT OR COMMIT TOKENS (Rule 002 — user funds must be safe):
+   - Pull tokens per fund-flow rule D above. taxToken is a Flap tax token and MAY be fee-on-transfer,
+     so ALWAYS credit the user with the balance delta:
+         uint256 beforeBal = IERC20(taxToken).balanceOf(address(this));
+         IERC20(taxToken).safeTransferFrom(msg.sender, address(this), amount);
+         uint256 received = IERC20(taxToken).balanceOf(address(this)) - beforeBal;
+         require(received > 0, unicode"No tokens received / 未收到代币");
+   - Withdrawals pay out exactly what the vault accounting says the user is owed — never a live
+     balanceOf-derived number, never someone else's funds.
+   - If depositors continuously share incoming BNB pro-rata, use an EXACT per-share accumulator:
+     a global accumulated-reward-per-committed-token counter (scaled by 1e18) plus a per-user debt
+     checkpoint. Settle or preserve a user's pending entitlement BEFORE changing their committed
+     balance. Pick ONE reward model and use it everywhere (never mix an accumulator with ad-hoc
+     bucket subtraction). Decide what happens to BNB that arrives while nothing is committed (hold
+     it in an undistributed bucket and roll it in later) and document that in description().
+   - Expose a pending-entitlement view (e.g. pendingReward(address)) and list it in vaultUISchema.
 
-R2. Scheduled / automated execution via FlapTriggerService (so no human controls timing):
-   - Also implement ITriggerReceiver:  contract X is CodegenVaultBase, ITriggerReceiver { ... }
-   - Schedule:  uint256 fee = IFlapTriggerService(_getFlapTriggerService()).getFee();
-                uint256 rid = IFlapTriggerService(_getFlapTriggerService()).requestTrigger{value: fee}(uint64(when));
-                scheduled[rid] = true;
-   - Receive (MUST validate the sender, re-check timing, consume the request):
-       function trigger(uint256 requestId) external override nonReentrant {
-           require(msg.sender == _getFlapTriggerService(), "Only trigger service");
-           require(scheduled[requestId], "Unknown request");
-           delete scheduled[requestId];
-           // ... do the scheduled action; re-validate any time/price conditions ...
-       }
-   - Same hard 2,000,000 gas cap; never assume it fires exactly at the scheduled time.
+IF THE MECHANIC HAS PAYOUTS TO USERS (Rule 003 — no favoritism, no gameable sizing):
+   - Prefer PULL payments: credit mapping(address => uint256) claimable amounts first, then a
+     nonReentrant claim function that zeroes the balance before _sendNative(msg.sender, amt).
+   - NEVER push BNB to a computed winner inside an oracle/trigger callback — a contract recipient
+     that reverts would brick the mechanic. Credit claimable and let them claim.
+   - Size every payout from vault accounting (buckets, committed balances) — never from live
+     balanceOf and never influenced by a privileged role choosing when to act in its own favor.
 
-R3. Use FlapAIConsumerBase whenever the mechanic needs a random or AI-decided outcome (lottery,
-    survivor elimination, weighted pick). Use FlapTriggerService (R2) for scheduled automation.
-    Simple stake/dividend/buyback vaults need neither.
+IF PARTICIPANTS JOIN A SET (any mechanic that later selects among, iterates, or eliminates members):
+   - Maintain address[] participants PLUS mapping(address => bool) joined for dedup — no duplicate pushes.
+   - Cap the set size with a require in the join function (<= 255 if an oracle later picks an index,
+     because the choice arrives as uint8) — any loop over participants must be bounded (gas DoS).
+   - Do NOT gate joining on interval timers (that locks the first round) — enforce cadence ONLY on
+     the action that executes the round. Block joins while an oracle request is pending.
+   - If joining is open (no taxToken balance gate), description() MUST disclose the Sybil risk;
+     if gated, use require(IERC20(taxToken).balanceOf(msg.sender) >= minimum) as a boolean gate only.
 
-R4. Randomness policy — block entropy is FORBIDDEN for outcomes:
-   - Flap has no Chainlink VRF. Use FlapAIProvider via FlapAIConsumerBase (R1/R5) for outcomes.
-   - If the user mentions prevrandao, VRF, or "random draw", still implement FlapAIConsumerBase.
-   - NEVER emit drawWinner() / pickWinner() that uses block.prevrandao % n or blockhash.
-   - In description(), vaultUISchema(), and comments: say "AI-provider selected" or "external AI provider selection"
-     for AI draws — never "secure random" or bare "random winner/participant" without disclosing AI-provider trust.
-   - If enter() is open (no taxToken balance gate), description MUST say so — Sybil risk otherwise.
-   - If enter() requires holders, require(IERC20(taxToken).balanceOf(msg.sender) >= minimum).
-   - Weekly/timed lotteries: requestDraw() enforces lastDrawTime + 1 weeks; _fulfillReasoning sets lastDrawTime = block.timestamp after payout.
-   - Prefer claimablePrize + claim() pull payment for winners.
+IF THE MECHANIC HAS RANDOM OR AI-DECIDED OUTCOMES (Rule 007 — oracle lifecycle):
+   There is NO Chainlink VRF on Flap and block entropy is FORBIDDEN for outcomes (the manager can
+   read prevrandao in-tx and act only when it favors them). Use the FlapAIProvider — a
+   commit-and-reveal oracle with an authenticated callback — via FlapAIConsumerBase. This applies to
+   ANY selection among participants or chance-based outcome, whatever the mechanic is called.
+   - Inherit it:  contract X is CodegenVaultBase, FlapAIConsumerBase { ... }
+   - The provider address is _getFlapAIProvider() (inherited). NEVER use _getPortal() or
+     _getFlapTriggerService() for the AI provider — they are different contracts.
+   - Keep uint256 public pendingRequestId; uint256 public aiModelId; and an onlyManager setter for
+     aiModelId that emits an event.
+   - Exact call shapes (these must compile):
+         uint256 fee = IFlapAIProvider(_getFlapAIProvider()).getModel(aiModelId).price;
+         pendingRequestId = IFlapAIProvider(_getFlapAIProvider()).reason{value: fee}(
+             aiModelId, "<instruction asking for one integer in [0, n-1]>", uint8(n));
+     Before the uint8(n) cast: require(n > 0 && n <= 255, "...").
+   - Implement the THREE required overrides (callback auth is the base's onlyFlapAIProvider — do NOT
+     write your own public fulfillReasoning):
+         function _fulfillReasoning(uint256 requestId, uint8 choice) internal override { ... }
+         function _onFlapAIRequestRefunded(uint256 requestId) internal override { ... }
+         function lastRequestId() public view override returns (uint256) { return pendingRequestId; }
+   - Request lifecycle (order matters):
+     * require(pendingRequestId == 0) before a new request — no overlapping async requests.
+     * SNAPSHOT the participant set into a dedicated storage array BEFORE the request so the set is
+       frozen before the outcome is known: delete the snapshot, then push each live participant.
+       NEVER loop <snapshot>.length immediately after delete — it is 0 until repopulated.
+     * Pay the oracle fee from the specific bucket that funds the outcome: require the bucket is
+       STRICTLY greater than the fee (never >= — the payout would be 0), decrement the bucket,
+       and record the fee paid in a state var so a refund can restore it.
+   - Fulfillment (callback runs under a HARD 2,000,000 gas cap — bounded loops only, no heavy
+     external calls, and it must never revert-lock):
+     * require(requestId == pendingRequestId, "..."), then clear pendingRequestId FIRST.
+     * Bounds-check: require(<snapshot>.length > 0 && choice < <snapshot>.length, "...").
+     * Index ONLY the snapshot with choice — never the live participant array.
+     * Apply the outcome; credit winners via the claimable mapping (pull payment).
+     * Reset the joined/dedup flags by looping the SNAPSHOT before deleting the live set; then
+       delete both arrays as the mechanic requires; clear the recorded fee; update any interval
+       timer to block.timestamp; emit an outcome event.
+   - Refund handler: if the requestId matches, clear pendingRequestId, restore the RECORDED FEE to
+     the funding bucket (never bucket += bucket — that doubles it), clear the recorded fee, delete
+     the snapshot, and emit a refund event.
+   - Emit events for: request made (id, count, fee), outcome applied, refund received, model updated.
+   - If the outcome ELIMINATES one member per round instead of paying one winner: require the live
+     set has MORE THAN ONE member before requesting (so the snapshot is always >= 2 at fulfill
+     time — a snapshot length of 1 can never occur, do not branch on it). In the callback, mark the
+     eliminated member, rebuild the live set from the snapshot keeping the still-active members, and
+     count the remaining members DURING that rebuild — if exactly one remains, that member is the
+     final winner. Delete the snapshot only AFTER rebuilding the live set from it.
 
-R5. Survivor / elimination (FlapAIConsumerBase — same snapshot rules as R1 lottery):
-   - requestElimination() MUST require(entrants.length > 1) — so drawSnapshot.length is ALWAYS >= 2 at fulfill time.
-     NEVER detect the final winner with if (drawSnapshot.length == 1) — that branch never runs.
-   - Snapshot entrants into drawSnapshot[] at requestElimination() BEFORE the AI request:
-       delete drawSnapshot;
-       for (uint256 i = 0; i < entrants.length; i++) drawSnapshot.push(entrants[i]);
-     NEVER loop i < drawSnapshot.length immediately after delete — the array is empty until repopulated.
-   - _fulfillReasoning elimination flow (ORDER MATTERS — do not delete drawSnapshot before rebuilding entrants):
-       function _fulfillReasoning(uint256 requestId, uint8 choice) internal override {
-           require(requestId == pendingRequestId, unicode"Stale request / 过期请求");
-           pendingRequestId = 0;
-           lastDrawFee = 0;
-           require(drawSnapshot.length > 1 && choice < drawSnapshot.length, unicode"Bad choice / 错误选择");
-           address eliminated = drawSnapshot[choice];
-           hasEntered[eliminated] = false;
-           emit Eliminated(eliminated);
-           delete entrants;
-           uint256 survivors;
-           address winner;
-           for (uint256 i = 0; i < drawSnapshot.length; i++) {
-               address player = drawSnapshot[i];
-               if (hasEntered[player]) {
-                   entrants.push(player);
-                   survivors++;
-                   winner = player;
-               }
-           }
-           delete drawSnapshot;
-           if (survivors == 1) {
-               uint256 prize = survivorPool;
-               survivorPool = 0;
-               hasEntered[winner] = false;
-               delete entrants;
-               _sendNative(winner, prize);
-               emit WinnerPaid(winner, prize);
-           }
-           lastEliminationTime = block.timestamp;
-       }
-   - Remove ONLY the eliminated player each round — never delete entrants then loop an already-deleted drawSnapshot.
-   - Cap entrants: MAX_ENTRANTS = 255; restore survivorPool += lastDrawFee on _onFlapAIRequestRefunded.
-   - In description(), say "external AI provider selection" for eliminations — not "secure random".
+IF THE MECHANIC HAS SCHEDULED OR AUTOMATED ACTIONS (Rule 008 — keeper/trigger compatibility):
+   - Simplest compliant pattern: an external "anyone can poke" or onlyManager trigger function that
+     require()s the time/state condition, executes the action, and updates the timer. It MUST appear
+     in vaultUISchema.methods — it is the primary action button and must not be hidden.
+   - For protocol automation use FlapTriggerService:
+     * Also implement ITriggerReceiver:  contract X is CodegenVaultBase, ITriggerReceiver { ... }
+     * Schedule:  uint256 fee = IFlapTriggerService(_getFlapTriggerService()).getFee();
+                  uint256 rid = IFlapTriggerService(_getFlapTriggerService()).requestTrigger{value: fee}(uint64(when));
+                  scheduled[rid] = true;
+     * trigger(uint256 requestId) external override nonReentrant MUST validate
+       msg.sender == _getFlapTriggerService(), require + delete scheduled[requestId], and RE-CHECK
+       the time/state conditions before acting.
+     * Same hard 2,000,000 gas cap; never assume it fires exactly at the scheduled time.
+
+IF THE MECHANIC IS INTERVAL-GATED (epochs, rounds, periodic executions):
+   - Initialize the timer state in the constructor (see hard requirement 2).
+   - Enforce cadence ONLY on the executing trigger, never on join/deposit paths.
+   - Update the timer when the round actually completes (e.g. in the oracle callback, not at request).
+   - Expose a countdown view and list it in vaultUISchema.methods so users see a live countdown:
+         function timeUntilNextExecution() public view returns (uint256) {
+             uint256 next = lastExecutionTime + EXECUTION_INTERVAL;
+             return block.timestamp >= next ? 0 : next - block.timestamp;
+         }
+
+Mechanics with none of the above (pure accounting/burn/treasury flows) need NO oracle, NO trigger
+service, and NO participant machinery — do not add them.
 
 EXACT STRUCT SHAPES — build the schema with FIELD ASSIGNMENT only. Do NOT use struct constructors
 like VaultMethodSchema({...}) (it has 8 fields and will fail). vaultType and description are STRINGS.
@@ -542,34 +578,37 @@ like VaultMethodSchema({...}) (it has 8 fields and will fail). vaultType and des
   struct FieldDescriptor { string name; string fieldType; string description; uint8 decimals; }
   struct VaultUISchema { string vaultType; string description; VaultMethodSchema[] methods; }
 
+  Neutral shape example — substitute the REAL view/write method names from the MechanicSpec's
+  uiMethods (this is a shape template, NOT a product suggestion):
+
   function vaultUISchema() public pure override returns (VaultUISchema memory schema) {
       schema.vaultType = "MyVault";              // a string, never a number
       schema.description = unicode"What it does / 中文说明";
       schema.methods = new VaultMethodSchema[](3);
 
-      // View: expose live bucket balance
-      schema.methods[0].name = "buybackBudget";
-      schema.methods[0].description = unicode"Current buyback BNB budget / 当前回购预算";
+      // View: expose a live bucket/state value (name = the actual public var or view function)
+      schema.methods[0].name = "rewardBucket";
+      schema.methods[0].description = unicode"Current reward bucket in BNB / 当前奖励池";
       schema.methods[0].inputs = new FieldDescriptor[](0);
       schema.methods[0].outputs = new FieldDescriptor[](1);
-      schema.methods[0].outputs[0] = FieldDescriptor("budget", "uint256", "Buyback budget in BNB", 18);
+      schema.methods[0].outputs[0] = FieldDescriptor("amount", "uint256", "Bucket balance in BNB", 18);
       schema.methods[0].approvals = new ApproveAction[](0);
 
-      // Write: executeBuyback
-      schema.methods[1].name = "executeBuyback";
-      schema.methods[1].description = unicode"Execute buyback with slippage protection / 执行回购";
+      // Write: a mechanic action with an input and no token approval
+      schema.methods[1].name = "executeRound";
+      schema.methods[1].description = unicode"Run the next round / 执行下一轮";
       schema.methods[1].isWriteMethod = true;
       schema.methods[1].inputs = new FieldDescriptor[](1);
-      schema.methods[1].inputs[0] = FieldDescriptor("minTokensOut", "uint256", "Minimum tokens out", 18);
+      schema.methods[1].inputs[0] = FieldDescriptor("minAmountOut", "uint256", "Slippage floor", 18);
       schema.methods[1].outputs = new FieldDescriptor[](0);
       schema.methods[1].approvals = new ApproveAction[](0);
 
-      // Write: stake with approval
-      schema.methods[2].name = "stake";
-      schema.methods[2].description = unicode"Stake tax tokens / 质押代币";
+      // Write: a method that pulls tokens via transferFrom (needs an ApproveAction)
+      schema.methods[2].name = "depositTokens";
+      schema.methods[2].description = unicode"Deposit tax tokens / 存入代币";
       schema.methods[2].isWriteMethod = true;
       schema.methods[2].inputs = new FieldDescriptor[](1);
-      schema.methods[2].inputs[0] = FieldDescriptor("amount", "uint256", "Amount to stake", 18);
+      schema.methods[2].inputs[0] = FieldDescriptor("amount", "uint256", "Amount to deposit", 18);
       schema.methods[2].outputs = new FieldDescriptor[](0);
       schema.methods[2].approvals = new ApproveAction[](1);
       schema.methods[2].approvals[0] = ApproveAction("taxToken", "amount");
@@ -620,14 +659,57 @@ function wantsUpgradeableMode(prompt: string): boolean {
   return /\b(production|upgradeable|beacon|mainnet-ready|mainnet ready)\b/i.test(prompt);
 }
 
-function resolveSystemPrompt(base: string, userPrompt: string, vaultPlan?: VaultPlan): string {
+/** Phase 6: no VaultPlan appendix — the MechanicSpec in the user message is the only plan. */
+function resolveSystemPrompt(base: string, userPrompt: string): string {
   let prompt = base;
-  if (vaultPlan) prompt += buildVaultPlanPromptAppendix(vaultPlan);
   if (wantsUpgradeableMode(userPrompt)) prompt += UPGRADEABLE_MODE_APPENDIX;
   return prompt;
 }
 
-export { classifyVaultPlan, type VaultPlan } from "./vault-plan.js";
+/**
+ * Spec-first generation instruction (Phase 2/3): the MechanicSpec is the
+ * authoritative plan — no "Vault kind:" framing, no VaultPlan commitment.
+ */
+export function buildGenerationUserMessage(userPrompt: string, spec: MechanicSpec): string {
+  const lc = spec.lifecycle;
+  const lifecycleOrders =
+    lc && lc.resourceType && lc.assignmentModel !== "not_applicable"
+      ? `
+
+Lifecycle & non-coder visibility orders (the spec has a discrete "${lc.resourceType}" resource):
+- Use a status ENUM (e.g. Open/Assigned/Submitted/Completed/Cancelled), not a single bool, when the ${lc.resourceType} has multiple lifecycle states.
+- ${lc.assignmentModel === "multi_assignee" ? `Multi-assignee is EXPLICIT in the spec: track accepted users per ${lc.resourceType}, keep completion and rewards PER USER, and never let one user's completion or a global deactivation trap another user's state or exit.` : `Enforce single-assignee: accepting sets the assignee; a second accept of the same ${lc.resourceType} must revert. Approval must verify the approved address IS the assignee.`}
+- ${lc.requiresSubmission === "yes" ? `Users submit their work on-chain (e.g. a proof hash) before approval; the approval function must reference that stored submission.` : `If completion depends on user work, store the submission on-chain or disclose off-chain review in description().`}
+- Reserve the reward into a per-user claimable mapping at ${lc.rewardReservationPoint === "unspecified" ? "approval" : lc.rewardReservationPoint.replace(/^on_/, "")} time (decrement the funding bucket, credit claimable[user]); the user claims via a pull payment.
+- Every assigned user must ALWAYS have an exit: implement the abandon path (${lc.abandonPath || `assignee clears their own assignment before approval`}) and the cancel path (${lc.cancelPath || `manager cancels an open/expired ${lc.resourceType} without trapping assigned users`}); clear or honor assignment state on every deactivation.
+- Views a non-coder needs (expose in vaultUISchema): a ${lc.resourceType} count, a per-id getter, a per-user assignment/status view, a per-user claimable-amount view, and the funding bucket. NEVER return unbounded dynamic arrays of structs with strings — use count + per-id getters.
+- Label manager-only actions as manager-only in their schema method descriptions.${lc.stateVisibilityRequirements.length ? `\n- Spec visibility requirements: ${lc.stateVisibilityRequirements.join("; ")}.` : ""}`
+      : "";
+  return `Write the vault contract for this idea:
+
+${userPrompt}
+
+${formatMechanicSpecForPrompt(spec)}
+
+Implementation orders:
+- The MechanicSpec above is the authoritative plan. Preserve the user's mechanic exactly — do not silently approximate it into a different product.
+- Implement every named action, bucket, and payout rule from the spec; use its free-form method names where they are valid Solidity identifiers.
+- Generate vaultUISchema() from the spec's uiMethods (plus every public state var, per the system rules).
+- Follow the spec's ruleAnalysis for which Flap constitution rules (Rules 001–009) apply, and make the mechanic pass the spec's testScenarios.
+- Any vault-kind hints elsewhere in this conversation are transitional compatibility context only.${lifecycleOrders}`;
+}
+
+// Phase 6: the retired VaultPlan taxonomy is no longer re-exported here — the
+// scope verdict model is the public surface alongside the MechanicSpec.
+export {
+  type VaultScope,
+  type ScopeVerdict,
+  type ApproximationConsent,
+  type ApproximationReport,
+  consentGate,
+  inferVaultScopeFromPrompt,
+  classifyVaultScope,
+} from "./vault-scope.js";
 
 export type RefineChatTurn = { role: "user" | "assistant"; content: string };
 
@@ -754,6 +836,71 @@ function isSurvivorMechanic(source: string, userPrompt = ""): boolean {
   );
 }
 
+/*
+ * ── PHASE 4 SCANNER-TRIGGER MIGRATION CHECKLIST (kind-derived → rule/structure-derived) ──
+ *
+ * Every bug-class check below is preserved; only WHAT MAKES IT FIRE changed.
+ *
+ * 1. scanVaultLogic isStake gate: was isStakingPlan(vaultPlan) || prompt keywords
+ *    → now share-accrual / deposit-function source structure (detectSourceStructure).
+ * 2. scanVaultLogic isBuyback gate: was vaultPlan.kind === "buyback" || prompt keyword
+ *    → now swap-helper / budget-bucket source structure.
+ * 3. scanVaultLogic isLottery gate: was isLotteryPlan(vaultPlan) || prompt keywords
+ *    → now oracle-lifecycle / block-entropy-with-participants source structure.
+ * 4. scanSafetyFullInjected isStake: was isStakingPlan(vaultPlan)
+ *    → now user-token-custody structure in the child source (transferFrom(msg.sender)).
+ * 5. scanSafety staking-guardian-trust-undisclosed: was `function stake(` + totalStaked
+ *    → now fires for ANY external function taking user token custody, free-form name.
+ * 6. patchReceiveBuybackBuckets: REMOVED — it invented a 50/50 buyback/jackpot split
+ *    (buybackBudget, weeklyJackpot, executeBuyback). Rule 005 violations in receive()
+ *    now surface as scanner findings repaired by the LLM with rule-derived guidance.
+ * 7. buildFailureMemoryJson / surgicalSafetyFixPrompt: dropped vaultKind +
+ *    kind-derived invariants; repair prompts cite Rule IDs, finding names, and the
+ *    MechanicSpec only.
+ *
+ * VaultKind remains transitional metadata elsewhere (vault-plan appendix, test-gen);
+ * removing it globally is Phase 5.
+ */
+
+/** Rule-derived structural signals — scanners key off these, never off VaultKind. */
+type SourceStructure = {
+  /** accRewardPerShare-style share-index accrual state (Rule 001/003 accounting checks). */
+  hasShareAccrual: boolean;
+  /** An external/public non-view function pulls user tokens via transferFrom(msg.sender …). */
+  hasUserTokenCustody: boolean;
+  /** stake()-shaped deposit accounting (kept for classic coverage; name is NOT required elsewhere). */
+  hasStakeShape: boolean;
+  /** Flap AI provider / oracle consumer / reasoning-request lifecycle present (Rule 007 checks). */
+  hasOracleLifecycle: boolean;
+  /** Block entropy used near a participant set (Rule 007 randomness checks). */
+  hasBlockEntropyOutcome: boolean;
+  /** Swap/buyback helpers or a tracked buyback budget (Rule 005 receive + slippage checks). */
+  hasSwapStructure: boolean;
+};
+
+function detectSourceStructure(source: string): SourceStructure {
+  const custodyFn = extractFunctionChunks(source).some(
+    (f) =>
+      /external|public/.test(f.header) &&
+      !/\bview\b|\bpure\b/.test(f.header) &&
+      /(?:safeT|t)ransferFrom\s*\(\s*msg\.sender/.test(f.body)
+  );
+  return {
+    hasShareAccrual: /accRewardPerShare/.test(source),
+    hasUserTokenCustody: custodyFn,
+    hasStakeShape: /function\s+stake\s*\(/.test(source) && /totalStaked/.test(source),
+    hasOracleLifecycle:
+      /FlapAIConsumerBase/.test(source) ||
+      /_fulfillReasoning|_onFlapAIRequestRefunded/.test(source) ||
+      /\.reason\s*\{/.test(source) ||
+      /function\s+requestDraw\s*\(|function\s+requestElimination\s*\(/.test(source),
+    hasBlockEntropyOutcome:
+      /block\.prevrandao|blockhash\s*\(/.test(source) &&
+      /entrants|entrantList|participants?|drawSnapshot|winner/i.test(source),
+    hasSwapStructure: /_buyAndBurn|swapExactInput|executeBuyback|buybackBudget/.test(source),
+  };
+}
+
 function replaceFunctionBody(source: string, fnName: string, newBody: string): string {
   const re = new RegExp(`function\\s+${fnName}\\s*\\([^)]*\\)[^{]*\\{`, "g");
   const m = re.exec(source);
@@ -769,83 +916,15 @@ function replaceFunctionBody(source: string, fnName: string, newBody: string): s
   return source.slice(0, start) + newBody + source.slice(i - 1);
 }
 
-function replaceReceiveBody(source: string, newBody: string): string {
-  const m = source.match(/receive\s*\(\s*\)\s*external\s+payable[^{]*\{/);
-  if (!m || m.index === undefined) return source;
-  const start = m.index + m[0].length;
-  let i = start;
-  let depth = 1;
-  for (; i < source.length && depth > 0; i++) {
-    const c = source[i];
-    if (c === "{") depth++;
-    else if (c === "}") depth--;
-  }
-  return source.slice(0, start) + newBody + source.slice(i - 1);
-}
-
-/** Move _buyAndBurn out of receive() into buybackBudget + executeBuyback (Rule 005 / buyback-split). */
-function patchReceiveBuybackBuckets(code: string): string {
-  const recvBody = extractReceiveBody(code);
-  if (!recvBody || !/_buyAndBurn\s*\(|swapExactInput/.test(recvBody)) return code;
-
-  let out = code;
-
-  if (!/\bbuybackBudget\b/.test(out)) {
-    const anchor = out.match(/uint256\s+public\s+(weeklyJackpot|totalBurned|currentWeek|jackpot|prizePotAmount)\s*;/);
-    if (anchor) {
-      out = out.replace(anchor[0], `${anchor[0]}\n    uint256 public buybackBudget;`);
-    } else {
-      out = out.replace(/(contract\s+\w+[^{]+\{)/, `$1\n    uint256 public buybackBudget;`);
-    }
-  }
-
-  const jackpotVar = /\bweeklyJackpot\b/.test(out)
-    ? "weeklyJackpot"
-    : /\bprizePotAmount\b/.test(out)
-      ? "prizePotAmount"
-      : /\bjackpot\b/.test(out)
-        ? "jackpot"
-        : "weeklyJackpot";
-
-  const depositLine = /emit\s+Deposit/.test(recvBody) ? "\n        emit Deposit(msg.sender, msg.value);" : "";
-
-  out = replaceReceiveBody(
-    out,
-    `
-        if (msg.value == 0) return;
-        uint256 burnShare = msg.value / 2;
-        uint256 jackpotShare = msg.value - burnShare;
-        buybackBudget += burnShare;
-        ${jackpotVar} += jackpotShare;${depositLine}
-    `
-  );
-
-  if (!/function\s+executeBuyback\s*\(/.test(out)) {
-    const executeFn = `
-    function executeBuyback(uint256 minTokensOut) external onlyManager nonReentrant {
-        require(minTokensOut > 0, unicode"Slippage required / 需要滑点保护");
-        uint256 amt = buybackBudget;
-        require(amt > 0, unicode"No buyback budget / 无回购预算");
-        buybackBudget = 0;
-        totalBurned += _buyAndBurn(amt, minTokensOut);
-        emit Burn(amt);
-    }
-`;
-    if (/function\s+requestDraw\s*\(/.test(out)) {
-      out = out.replace(/(\n\s*function\s+requestDraw\s*\()/, `${executeFn}$1`);
-    } else if (/function\s+enter\s*\(/.test(out)) {
-      const enterChunk = extractFunctionChunks(out).find((f) => f.name === "enter");
-      if (enterChunk) {
-        const end = out.indexOf(enterChunk.header) + enterChunk.header.length + enterChunk.body.length + 1;
-        out = out.slice(0, end) + executeFn + out.slice(end);
-      }
-    } else {
-      out = out.replace(/(\n\s*function\s+setAiModel\s*\()/, `${executeFn}$1`);
-    }
-  }
-
-  return out;
-}
+/**
+ * Phase 4: the former patchReceiveBuybackBuckets deterministic patch was REMOVED.
+ * It invented a product mechanic (50/50 buyback/jackpot split, buybackBudget,
+ * weeklyJackpot, executeBuyback) that the user's MechanicSpec never asked for.
+ * Unsafe logic inside receive() (Rule 005) now surfaces as scanner findings
+ * (receive-no-external-call / receive-no-transfer / receive-no-loop) and is
+ * repaired by the LLM with rule-derived guidance — deterministic mutation must
+ * never author mechanics.
+ */
 
 /** Cap lottery entrants at 255 in enter(), not only at draw time. */
 function patchEntrantCap(code: string): string {
@@ -896,11 +975,14 @@ function isForgeCompileSuccess(out: string): boolean {
   return /Compiler run successful/i.test(out);
 }
 
-/** Deterministic fixes for patterns the AI often misses after many retries. */
+/** Deterministic fixes for patterns the AI often misses after many retries.
+ * Phase 4 constraint: patches may enforce safety constraints (caps, guards,
+ * reentrancy, disclosure) but must NEVER invent product mechanics (buckets,
+ * splits, reward flows). Rule 005 receive() violations are left to the
+ * scanner + LLM repair loop. */
 export function applyCommonCodegenPatches(code: string): string {
   let out = code;
 
-  out = patchReceiveBuybackBuckets(out);
   out = patchEntrantCap(out);
   out = patchEnterNonReentrant(out);
   out = patchAiLotteryDisclosure(out);
@@ -968,25 +1050,25 @@ function publicStateMissingFromUISchema(source: string, schemaBody: string): str
     if (schemaBody.includes(`"${name}"`)) continue;
     const camel = name.charAt(0).toUpperCase() + name.slice(1);
     if (schemaBody.includes(`"get${camel}"`)) continue;
+    if (schemaBody.includes(`"view${camel}"`)) continue;
     missing.push(name);
   }
   return missing;
 }
 
-/** Prompt-aware logic checks beyond structural patterns — used by scanSafety and verify-codegen. */
-export function scanVaultLogic(source: string, userPrompt = "", vaultPlan?: VaultPlan): string[] {
+/** Source-structure logic checks beyond structural patterns — used by scanSafety and verify-codegen.
+ * Phase 4: triggers are rule/structure-derived (never VaultKind-derived); vaultPlan is accepted
+ * only for API compatibility and is not consulted. */
+export function scanVaultLogic(source: string, userPrompt = "", _vaultPlan?: VaultPlan): string[] {
   const issues: string[] = [];
   const prompt = userPrompt.toLowerCase();
-  const isStake =
-    isStakingPlan(vaultPlan ?? { kind: "treasury", usesStaking: false } as VaultPlan) ||
-    /stake|dividend|earn|reward/i.test(prompt) ||
-    (/accRewardPerShare/.test(source) && /function\s+stake\s*\(/.test(source));
-  const isBuyback =
-    vaultPlan?.kind === "buyback" || /buyback/i.test(prompt) || /buybackBudget/.test(source);
-  const isLottery =
-    isLotteryPlan(vaultPlan ?? { kind: "treasury", usesFlapAI: false, usesEntrants: false } as VaultPlan) ||
-    /lottery|raffle|jackpot/i.test(prompt) ||
-    (/FlapAIConsumerBase/.test(source) && /entrants/.test(source));
+  const structure = detectSourceStructure(source);
+  // Share-accrual / deposit accounting checks (classically "staking") fire from source structure.
+  const isStake = structure.hasShareAccrual || structure.hasStakeShape;
+  // Swap-out-of-receive checks (classically "buyback") fire from swap/budget structure.
+  const isBuyback = structure.hasSwapStructure;
+  // Oracle-outcome checks (classically "lottery") fire from the AI/oracle lifecycle or block entropy.
+  const isLottery = structure.hasOracleLifecycle || structure.hasBlockEntropyOutcome;
 
   if (isStake) {
     const recv = source.match(/receive\s*\(\s*\)\s*external\s+payable[^{]*\{([\s\S]*?)^\s*\}/m)?.[1] ?? "";
@@ -1110,7 +1192,10 @@ export function scanVaultLogic(source: string, userPrompt = "", vaultPlan?: Vaul
         issues.push("hasEntered mapping never reset when round ends");
       }
     }
-    if (/holder|hold token|token holder/i.test(prompt) && /function enter/.test(source)) {
+    const holderRequirement =
+      /holder|hold token|token holder/i.test(prompt) ||
+      /holder|持有/i.test(source.match(/function description[\s\S]*?^\s*\}/m)?.[0] ?? "");
+    if (holderRequirement && /function enter/.test(source)) {
       const enter = source.match(/function enter[\s\S]*?^\s*\}/m)?.[0] ?? "";
       if (!/balanceOf\s*\(\s*msg\.sender\s*\)/.test(enter)) {
         issues.push("Holder lottery enter() missing taxToken balance check");
@@ -1236,7 +1321,7 @@ export function scanSafety(
   userPrompt = "",
   opts: ScanSafetyOptions = {}
 ): { level: SafetyLevel; findings: SafetyFinding[] } {
-  const { sourceScope = "child", vaultPlan, childSource, fullSourceOnly = false } = opts;
+  const { sourceScope = "child", vaultPlan, childSource, fullSourceOnly = false, mechanicSpec } = opts;
   const findings: SafetyFinding[] = [];
   const add = (level: "block" | "warn", rule: string, detail: string) =>
     findings.push({ level, rule, detail, sourceScope });
@@ -1254,7 +1339,15 @@ export function scanSafety(
   const has = (re: RegExp) => re.test(source);
   const hasBuyback =
     /buybackBudget|executeBuyback|_buyAndBurn/i.test(source) || /buyback/i.test(userPrompt);
-  const hasBuckets = /buybackBudget|treasury|jackpot|rewardPool|prizePotAmount|survivorPool/i.test(source);
+  // Bucket solvency (Rule 001/003) fires structurally: any state var accumulated in
+  // receive() and later spent (-=/= 0) is a fund bucket — user-chosen names included.
+  const recvBodyForBuckets = extractReceiveBody(source) ?? "";
+  const structuralBuckets = [...recvBodyForBuckets.matchAll(/(\w+)\s*\+=/g)]
+    .map((m) => m[1]!)
+    .filter((name) => new RegExp(`${name}\\s*(?:-=|=\\s*0\\s*;)`).test(source));
+  const hasBuckets =
+    /buybackBudget|treasury|jackpot|rewardPool|prizePotAmount|survivorPool/i.test(source) ||
+    structuralBuckets.length > 0;
   const entrantArrayRe = /(?:entrants|entrantList|participantList|entryList)/;
   const prizeBucketRe = /(?:jackpot|prizePotAmount|survivorPool|rewardPool)/;
   const hasLottery =
@@ -1957,8 +2050,11 @@ export function scanSafety(
     }
   }
 
-  // Staking: disclose Guardian Rule 009 trust in description/schema.
-  if (has(/function\s+stake\s*\(/) && has(/totalStaked/)) {
+  // Rule 009: any vault taking user token custody (free-form deposit/commit/lock names)
+  // must disclose Guardian emergency recovery in description/schema — fires from
+  // transferFrom(msg.sender …) structure, not from a "stake" vocabulary gate.
+  const custody = detectSourceStructure(source);
+  if (custody.hasUserTokenCustody || custody.hasStakeShape) {
     const stakeTrust = [
       extractFunctionChunks(source).find((f) => f.name === "description")?.body ?? "",
       extractVaultUISchemaBody(source) ?? "",
@@ -1967,7 +2063,7 @@ export function scanSafety(
       add(
         "block",
         "staking-guardian-trust-undisclosed",
-        "Staking vault description()/vaultUISchema must disclose Guardian emergency recovery per Flap Rule 009."
+        "Vault takes custody of user tokens (transferFrom in a user action) — description()/vaultUISchema must disclose Guardian emergency recovery per Flap Rule 009."
       );
     }
   }
@@ -2255,9 +2351,9 @@ export function scanSafety(
     add("block", "vault-logic", detail);
   }
 
-  for (const mf of scanMechanicCompleteness(source, userPrompt, vaultPlan)) {
+  for (const mf of scanMechanicCompleteness(source, userPrompt, vaultPlan, mechanicSpec)) {
     if (findings.some((f) => f.rule === mf.rule)) continue;
-    add("block", mf.rule, mf.detail);
+    add(mf.level ?? "block", mf.rule, mf.detail);
   }
 
   const level: SafetyLevel = findings.some((f) => f.level === "block")
@@ -2273,12 +2369,12 @@ function scanSafetyFullInjected(
   fullSource: string,
   childSource: string,
   userPrompt: string,
-  vaultPlan: VaultPlan | undefined,
+  _vaultPlan: VaultPlan | undefined,
   add: (level: "block" | "warn", rule: string, detail: string) => void
 ): void {
-  const isStake =
-    isStakingPlan(vaultPlan ?? { kind: "treasury", usesStaking: false } as VaultPlan) ||
-    (/function\s+stake\s*\(/.test(childSource) && /totalStaked/.test(childSource));
+  // Phase 4: fires from user-token-custody structure in the child source, not from VaultKind.
+  const childStructure = detectSourceStructure(childSource);
+  const isStake = childStructure.hasUserTokenCustody || childStructure.hasStakeShape;
 
   if (!isStake) return;
 
@@ -2317,12 +2413,14 @@ export function scanSafetyCombined(
   fullSource: string,
   contractName: string,
   userPrompt: string,
-  vaultPlan?: VaultPlan
+  vaultPlan?: VaultPlan,
+  mechanicSpec?: MechanicSpec
 ): { level: SafetyLevel; findings: SafetyFinding[] } {
   const child = scanSafety(childSource, contractName, userPrompt, {
     sourceScope: "child",
     vaultPlan,
     childSource,
+    mechanicSpec,
   });
   const full = scanSafety(fullSource, contractName, userPrompt, {
     sourceScope: "full-injected",
@@ -2408,22 +2506,123 @@ export async function cleanupCodegen(): Promise<void> {
   if (existsSync(CODEGEN_DIR)) await rm(CODEGEN_DIR, { recursive: true, force: true });
 }
 
-async function readArtifact(
-  artifactPath: string
-): Promise<{ abi: unknown[] | null; creationBytecode: string | null; bytecodeSize: number | null }> {
+async function readArtifact(artifactPath: string): Promise<{
+  abi: unknown[] | null;
+  creationBytecode: string | null;
+  bytecodeSize: number | null;
+  deployedBytecodeSize: number | null;
+}> {
   try {
     const raw = await readFile(artifactPath, "utf8");
     const json = JSON.parse(raw);
     const bytecode: string = json?.bytecode?.object ?? "";
     const creationBytecode = bytecode.startsWith("0x") ? bytecode : null;
     const size = creationBytecode ? (creationBytecode.length - 2) / 2 : null;
-    return { abi: json?.abi ?? null, creationBytecode, bytecodeSize: size };
+    const deployedBytecode: string = json?.deployedBytecode?.object ?? "";
+    const deployedSize = deployedBytecode.startsWith("0x") ? (deployedBytecode.length - 2) / 2 : null;
+    return { abi: json?.abi ?? null, creationBytecode, bytecodeSize: size, deployedBytecodeSize: deployedSize };
   } catch {
-    return { abi: null, creationBytecode: null, bytecodeSize: null };
+    return { abi: null, creationBytecode: null, bytecodeSize: null, deployedBytecodeSize: null };
   }
 }
 
+/** EIP-170 (Spurious Dragon): a deployed contract's runtime code can never exceed 24,576 bytes
+ *  on any EVM chain. This is a hard protocol limit, not a Flap/gas/network issue — a vault over
+ *  this size will ALWAYS fail to deploy via CREATE2 (factory sees `vault == address(0)` and
+ *  reverts DeployFailed()), no matter how many times it's registered/re-launched. Catch it at
+ *  compile time so it never reaches a user as a cryptic on-chain revert. */
+export const MAX_DEPLOYED_BYTECODE_SIZE = 24_576;
+
+/**
+ * One-shot rescue for a vault that compiles and passes every check EXCEPT it's over the
+ * EIP-170 deployed-bytecode limit: recompile with solc's IR-based pipeline (`--via-ir`),
+ * which for large, branch-heavy generated contracts routinely produces meaningfully
+ * smaller runtime bytecode than the legacy codegen path (observed ~40% smaller on a real
+ * oversized vault) at the cost of a much slower single compile. Only worth trying once,
+ * on demand, never as the default pipeline compiler (it would make every iterative
+ * compile-fix-retry cycle far too slow).
+ */
+async function tryViaIRRescue(
+  filePath: string,
+  artifactPath: string
+): Promise<{
+  abi: unknown[] | null;
+  creationBytecode: string | null;
+  bytecodeSize: number | null;
+  deployedBytecodeSize: number | null;
+} | null> {
+  if (!filePath || !artifactPath) return null;
+  try {
+    await execAsync(`"${FORGE}" build "${filePath}" --via-ir --optimizer-runs 200 --force 2>&1`, {
+      cwd: REPO_ROOT,
+      timeout: 240_000,
+      maxBuffer: 1024 * 1024 * 16,
+    });
+  } catch (err: unknown) {
+    const e = err as { stdout?: string; stderr?: string; message?: string };
+    const raw = (e.stdout || "") + (e.stderr || "") || e.message || "";
+    if (!isForgeCompileSuccess(raw)) return null;
+  }
+  const artifact = await readArtifact(artifactPath);
+  if (deployedSizeFinding(artifact.deployedBytecodeSize)) return null;
+  return artifact;
+}
+
+export function deployedSizeFinding(deployedBytecodeSize: number | null): SafetyFinding | null {
+  if (deployedBytecodeSize === null || deployedBytecodeSize <= MAX_DEPLOYED_BYTECODE_SIZE) return null;
+  const overBy = deployedBytecodeSize - MAX_DEPLOYED_BYTECODE_SIZE;
+  return {
+    level: "block",
+    rule: "deployed-bytecode-exceeds-eip170",
+    detail:
+      `Deployed (runtime) bytecode is ${deployedBytecodeSize} bytes — ${overBy} bytes over the ` +
+      `${MAX_DEPLOYED_BYTECODE_SIZE}-byte EIP-170 limit every EVM chain enforces. CREATE2 deployment ` +
+      `will ALWAYS fail (factory sees vault == address(0) and reverts DeployFailed()) regardless of ` +
+      `network or retries. Shrink the contract: split rarely-used admin/view logic into fewer, more ` +
+      `generic functions, remove redundant state/events, or simplify the mechanic surface. This is a ` +
+      `hard on-chain limit, not a style preference.`,
+  };
+}
+
 type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
+
+/**
+ * Cost control: cap what a retry resends. Keeps the seed head (system prompt +
+ * initial user message [+ refine history]) and only the LATEST assistant draft
+ * plus everything after it (the pending fix prompt). Older failed drafts —
+ * each a full contract — are collapsed into a short failure summary, so the
+ * conversation stays ~2 attempts large no matter how many retries happen.
+ */
+export function pruneRetryHistory(
+  messages: ChatMessage[],
+  headLength: number,
+  fixLog: FixLogEntry[]
+): ChatMessage[] {
+  const head = messages.slice(0, headLength);
+  const tail = messages.slice(headLength);
+  let lastAssistantIdx = -1;
+  for (let i = tail.length - 1; i >= 0; i--) {
+    if (tail[i]!.role === "assistant") {
+      lastAssistantIdx = i;
+      break;
+    }
+  }
+  // Nothing before the latest draft to drop.
+  if (lastAssistantIdx <= 0) return messages;
+  const droppedDrafts = tail.slice(0, lastAssistantIdx).filter((m) => m.role === "assistant").length;
+  const failureLines = fixLog
+    .filter((f) => ["compile_fix", "safety_fix", "test_fix", "critic_repair"].includes(f.phase))
+    .slice(0, -1) // the newest failure is fully described in the pending fix prompt
+    .slice(-8)
+    .map((f) => `- attempt ${f.attempt} [${f.phase}${f.rule ? `: ${f.rule}` : ""}] ${f.message.slice(0, 160)}`);
+  const summary: ChatMessage = {
+    role: "user",
+    content:
+      `NOTE: ${droppedDrafts} earlier failed draft(s) were removed from this conversation to save space. ` +
+      `Do NOT repeat their mistakes:\n${failureLines.join("\n") || "- (see the fix instructions below)"}`,
+  };
+  return [...head, summary, ...tail.slice(lastAssistantIdx)];
+}
 
 function buildRefineSeedMessages(session: RefineSession, refineMessage: string, systemPrompt: string): ChatMessage[] {
   const messages: ChatMessage[] = [{ role: "system", content: systemPrompt }];
@@ -2461,6 +2660,7 @@ export type CodegenStatusPhase =
   | "compile_failed"
   | "auditing"
   | "generating_tests"
+  | "ui_gen"
   | "done"
   | "error";
 
@@ -2478,11 +2678,29 @@ export type CodegenEvent =
   | { type: "name"; contractName: string }
   | { type: "explanation"; text: string }
   | { type: "spec_audit"; audit: SpecAuditResult }
+  | { type: "scope"; scope: VaultScope }
+  | { type: "mechanic_spec"; spec: MechanicSpec }
+  | { type: "simulation_report"; report: SimulationReport }
+  | { type: "economic_critique"; report: EconomicCriticReport }
+  | {
+      /** Phase 6: the idea is not launch-ready as requested — generation is paused for an explicit choice. */
+      type: "consent_required";
+      scope: VaultScope;
+      spec: MechanicSpec;
+      options: { id: ApproximationConsent | "stop"; label: string }[];
+    }
+  | {
+      /** Phase 8: safety-relevant mechanic decisions are missing — generation is paused for plain-English answers or an explicit choice. */
+      type: "design_questions";
+      spec: MechanicSpec;
+      questions: DesignQuestion[];
+      options: { id: ApproximationConsent | "stop"; label: string }[];
+    }
   | { type: "result"; result: CodegenResult }
   | { type: "error"; error: string };
 
 async function aiGenerateJson(
-  client: import("openai").default,
+  client: AiChatClient,
   model: string,
   messages: ChatMessage[]
 ): Promise<{ raw: string; contractName: string; code: string; explanation: string }> {
@@ -2490,11 +2708,13 @@ async function aiGenerateJson(
     model,
     temperature: 0.2,
     response_format: { type: "json_object" },
+    max_tokens: CODEGEN_MAX_OUTPUT_TOKENS,
+    cache_conversation: true, // retry loop — the next attempt re-reads this prefix
     messages,
   });
   const raw = completion.choices[0]?.message?.content;
   if (!raw) throw new Error("Empty AI response");
-  const obj = JSON.parse(raw);
+  const obj = JSON.parse(extractJsonPayload(raw));
   return {
     raw,
     contractName: sanitizeName(String(obj.contractName ?? "GeneratedVault")),
@@ -2520,7 +2740,7 @@ function humanStatusMessage(phase: CodegenStatusPhase, attempt: number, message?
     case "test_fix":
       return message ? `Fixing integration test failures (${message})…` : "Fixing behavioral test failures…";
     case "classifying":
-      return "Classifying vault mechanic and building invariant plan…";
+      return "Planning the mechanic spec (plan-first)…";
     case "generating_tests":
       return message ?? "Generating integration test (Rule 006)…";
     case "auditing":
@@ -2566,6 +2786,13 @@ function describeCodeReset(lastFix: FixLogEntry | undefined, attempt: number): P
       message: `Integration/invariant tests failed. Starting pass ${attempt} to fix vault logic.`,
     };
   }
+  if (kind === "critic_repair") {
+    return {
+      reason: "retry",
+      retryKind: kind,
+      message: `Economic critic flagged serious findings. Starting pass ${attempt} with an automatic repair.`,
+    };
+  }
   return {
     reason: "retry",
     retryKind: kind,
@@ -2574,7 +2801,7 @@ function describeCodeReset(lastFix: FixLogEntry | undefined, attempt: number): P
 }
 
 async function aiGenerateStream(
-  client: import("openai").default,
+  client: AiChatClient,
   model: string,
   messages: ChatMessage[],
   emit: (ev: CodegenEvent) => void,
@@ -2586,6 +2813,8 @@ async function aiGenerateStream(
     model,
     temperature: 0.2,
     stream: true,
+    max_tokens: CODEGEN_MAX_OUTPUT_TOKENS,
+    cache_conversation: true, // retry loop — the next attempt re-reads this prefix
     messages,
   });
 
@@ -2617,9 +2846,59 @@ async function aiGenerateStream(
   };
 }
 
-/** Unified pipeline: classify → compile → dual safety → tests → advisory audit → fix until pass or budget exhausted. */
+/**
+ * Phase 6: a pipeline stop BEFORE Solidity generation — either awaiting the
+ * user's explicit approximation choice, delivering a spec-only draft, or
+ * refusing an unsafe mechanic. Never a silent approximation.
+ */
+function earlyStopResult(
+  mechanicSpec: MechanicSpec,
+  scope: VaultScope,
+  deliverable: "spec_only" | "consent_required" | "refused_unsafe" | "design_questions",
+  approximation: ApproximationReport | null,
+  designQuestions: DesignQuestion[] = []
+): Omit<CodegenResult, "mode" | "tokenUsage"> {
+  const explanation =
+    deliverable === "refused_unsafe"
+      ? `Not generated: ${scope.summary} Required to proceed: ${scope.requiredForLaunch.join("; ") || "a redesigned, honest mechanic"}.`
+      : deliverable === "spec_only"
+        ? `Draft spec only (your choice): ${scope.summary}`
+        : deliverable === "design_questions"
+          ? `Your idea needs ${designQuestions.length} design decision(s) before safe code can be generated. Answer the questions (refine your prompt), or choose a conservative safe draft with the defaults explained.`
+          : `Awaiting your choice: ${scope.summary} Pick how to proceed — closest Flap-compatible draft, spec-only draft, or stop.`;
+  return {
+    contractName: mechanicSpec.contractName || "GeneratedVault",
+    explanation,
+    source: "",
+    compiled: false,
+    compileErrors: "",
+    safety: { level: "pass", findings: [] },
+    specAudit: { level: "skipped", summary: "No contract generated.", items: [], mode: "skipped" },
+    mechanicSpec,
+    scope,
+    deliverable,
+    approximation,
+    designQuestions,
+    designDecisions: [],
+    abi: null,
+    creationBytecode: null,
+    bytecodeSize: null,
+    deployedBytecodeSize: null,
+    attempts: 0,
+    integrationTestPath: null,
+    integrationTestsPassed: false,
+    simulationReport: null,
+    economicCritique: null,
+    repairAttempts: [],
+    fixLog: [],
+    autoFixExhausted: false,
+    uiArtifact: null,
+  };
+}
+
+/** Unified pipeline: plan spec → scope verdict → consent gate → compile → dual safety → tests → advisory audit → fix until pass or budget exhausted. */
 async function runCodegenPipeline(opts: {
-  client: import("openai").default;
+  client: AiChatClient;
   model: string;
   apiKey: string;
   userPrompt: string;
@@ -2628,33 +2907,126 @@ async function runCodegenPipeline(opts: {
   emit?: (ev: CodegenEvent) => void;
   seedMessages?: ChatMessage[];
   scanPrompt?: string;
-  vaultPlan?: VaultPlan;
-}): Promise<Omit<CodegenResult, "mode">> {
-  const { client, model, apiKey, userPrompt, systemPrompt, stream, emit, seedMessages, scanPrompt, vaultPlan: seedPlan } =
-    opts;
+  mechanicSpec?: MechanicSpec;
+  /** Phase 6: the user's explicit choice when the idea is not launch-ready as requested. */
+  approximationConsent?: ApproximationConsent;
+}): Promise<Omit<CodegenResult, "mode" | "tokenUsage">> {
+  const {
+    client,
+    model,
+    apiKey,
+    userPrompt,
+    systemPrompt,
+    stream,
+    emit,
+    seedMessages,
+    scanPrompt,
+    mechanicSpec: seedSpec,
+    approximationConsent,
+  } = opts;
   const safetyPrompt = scanPrompt ?? userPrompt;
+  // Advisory-only calls (scope verdict, spec pre-audit, economic critic) run on
+  // the cheap model when configured — they never gate the pipeline, so a
+  // smaller model there cuts cost without touching codegen quality.
+  const advisoryModel = resolveCheapModel();
 
-  let vaultPlan = seedPlan;
-  if (!vaultPlan) {
-    emit?.({ type: "status", phase: "classifying", attempt: 0, message: "Classifying vault mechanic…" });
-    vaultPlan = await classifyVaultPlan(userPrompt, apiKey, model);
-    emit?.({ type: "status", phase: "classifying", attempt: 0, message: "Designing mechanic lifecycle…" });
-    vaultPlan = await expandMechanicDesign(userPrompt, vaultPlan, apiKey, model);
+  let mechanicSpec = seedSpec;
+  let scope: VaultScope | undefined;
+  let approximation: ApproximationReport | null = null;
+  let designQuestions: DesignQuestion[] = [];
+  let designDecisions: string[] = [];
+  if (!mechanicSpec) {
+    emit?.({ type: "status", phase: "classifying", attempt: 0, message: "Planning the mechanic spec (plan-first)…" });
+    // Phase 6 main path: MechanicSpec plan + scope verdict, in parallel.
+    // No VaultPlan/VaultKind classification anymore.
+    const [plannedSpec, scopeResult] = await Promise.all([
+      planMechanicSpec(userPrompt, apiKey, model),
+      classifyVaultScope(userPrompt, apiKey, advisoryModel),
+    ]);
+    mechanicSpec = plannedSpec;
+    scope = scopeResult;
+    emit?.({ type: "scope", scope });
+    emit?.({ type: "mechanic_spec", spec: mechanicSpec });
+    emit?.({ type: "status", phase: "classifying", attempt: 0, message: "Mechanic plan ready…" });
+
+    // ── Phase 6 consent gate: no silent approximation. Refinements of an
+    //    already-generated vault (seedMessages) skip the gate — consent was
+    //    given when the vault was first generated.
+    if (!seedMessages) {
+      const decision = consentGate(scope, approximationConsent);
+      if (decision.action === "refuse_unsafe") {
+        return earlyStopResult(mechanicSpec, scope, "refused_unsafe", null);
+      }
+      if (decision.action === "await_consent") {
+        emit?.({
+          type: "consent_required",
+          scope,
+          spec: mechanicSpec,
+          options: [
+            { id: "closest_draft", label: "Build the closest Flap-compatible draft (differences listed honestly)" },
+            { id: "spec_only", label: "Keep this as a draft spec only — no contract yet" },
+            { id: "stop", label: "Stop — explain what would be required to build it as requested" },
+          ],
+        });
+        return earlyStopResult(mechanicSpec, scope, "consent_required", null);
+      }
+      if (decision.action === "spec_only") {
+        return earlyStopResult(mechanicSpec, scope, "spec_only", buildApproximationReport(userPrompt, scope));
+      }
+      if (decision.asDraft) {
+        approximation = buildApproximationReport(userPrompt, scope);
+      }
+
+      // ── Phase 8 design-question gate: unresolved SAFETY-relevant mechanic
+      //    decisions (assignment model, reward amount, exits, proof, eligibility)
+      //    pause generation for plain-English answers. The same explicit consent
+      //    value unlocks a CONSERVATIVE draft with every default explained —
+      //    silent risky defaults are impossible.
+      const designDecision = designQuestionGate(userPrompt, mechanicSpec, approximationConsent);
+      if (designDecision.action === "ask") {
+        emit?.({
+          type: "design_questions",
+          spec: mechanicSpec,
+          questions: designDecision.questions,
+          options: [
+            { id: "closest_draft", label: "Use safe conservative choices for me (each choice will be explained)" },
+            { id: "spec_only", label: "Keep this as a draft spec only — no contract yet" },
+            { id: "stop", label: "Stop — I will answer the questions in a new prompt" },
+          ],
+        });
+        return earlyStopResult(mechanicSpec, scope, "design_questions", null, designDecision.questions);
+      }
+      if (designDecision.action === "spec_only") {
+        return earlyStopResult(mechanicSpec, scope, "spec_only", buildApproximationReport(userPrompt, scope), designDecision.questions);
+      }
+      if (designDecision.action === "proceed_conservative") {
+        const applied = applyConservativeLifecycleDefaults(userPrompt, mechanicSpec);
+        mechanicSpec = applied.spec;
+        designDecisions = applied.decisions;
+        designQuestions = designDecision.questions;
+        emit?.({ type: "mechanic_spec", spec: mechanicSpec });
+        emit?.({
+          type: "status",
+          phase: "classifying",
+          attempt: 0,
+          message: `Proceeding with ${applied.decisions.length} safe conservative design choice(s) — each is recorded in the result.`,
+        });
+      }
+    }
   }
+  if (!mechanicSpec) mechanicSpec = inferMechanicSpecFromPrompt(userPrompt);
 
-  const resolvedSystemPrompt = systemPrompt.includes("VAULT PLAN")
-    ? systemPrompt
-    : resolveSystemPrompt(systemPrompt.replace(/VAULT PLAN[\s\S]*$/, "").trim() || systemPrompt, userPrompt, vaultPlan);
+  const resolvedSystemPrompt = resolveSystemPrompt(systemPrompt, userPrompt);
 
-  const messages: ChatMessage[] =
+  let messages: ChatMessage[] =
     seedMessages ??
     [
       { role: "system", content: resolvedSystemPrompt },
-      {
-        role: "user",
-        content: `Write the vault contract for this idea:\n\n${userPrompt}\n\nVault kind: ${vaultPlan.kind}. Commit to the VaultPlan invariants before writing code.`,
-      },
+      { role: "user", content: buildGenerationUserMessage(userPrompt, mechanicSpec) },
     ];
+  // Everything up to here is the stable head that pruning must never touch
+  // (it is also the prompt-cache-friendly prefix).
+  const messagesHeadLength = messages.length;
 
   const fixLog: FixLogEntry[] = [];
   const previousFailures = new Set<string>();
@@ -2668,19 +3040,26 @@ async function runCodegenPipeline(opts: {
   let attempts = 0;
   let integrationTestPath: string | null = null;
   let integrationTestsPassed = false;
+  let simulationReport: SimulationReport | null = null;
+  let testJourneys: TestJourney[] = [];
+  const failingScenarios = (): SimulationScenarioResult[] =>
+    simulationReport?.scenarios.filter((s) => s.status === "fail") ?? [];
   let specAudit: SpecAuditResult = {
     level: "skipped",
     summary: "Not audited yet.",
     items: [],
     mode: "openai",
   };
-  let safety = scanSafety("", "GeneratedVault", safetyPrompt, { vaultPlan });
+  let safety = scanSafety("", "GeneratedVault", safetyPrompt);
   let abi: unknown[] | null = null;
   let creationBytecode: string | null = null;
   let bytecodeSize: number | null = null;
+  let deployedBytecodeSize: number | null = null;
   let fullSource = "";
   let pendingFix: string | null = null;
   let testFixAttempts = 0;
+  let lastAssistantOut = "";
+  const repairAttempts: RepairAttempt[] = [];
 
   const status = (phase: CodegenStatusPhase, message?: string) => {
     emit?.({
@@ -2697,19 +3076,61 @@ async function runCodegenPipeline(opts: {
     emit?.({ type: "fix_log", entry });
   };
 
-  const runIntegrationGate = async (): Promise<{ passed: boolean; errors: string }> => {
-    status("generating_tests", "Writing integration test (Rule 006)…");
-    const tr = await generateIntegrationTest(contractName, artifactPath, fullSource, apiKey, model, vaultPlan);
-    if (!tr.ok) {
-      pushFix({ phase: "generating_tests", attempt: attempts, message: tr.errors.slice(0, 200) });
-      return { passed: false, errors: `Integration test generation failed:\n${tr.errors}` };
-    }
-    integrationTestPath = tr.path;
-    pushFix({ phase: "generating_tests", attempt: attempts, message: tr.path });
+  // Cost control: regenerating the integration test is an expensive LLM call.
+  // When a fix pass changed only the vault's internals (same contract name and
+  // public ABI), the previously generated suite still describes the same
+  // surface — reuse it and only refresh the deploy bytecode it forks with.
+  let reusableTest: { interfaceHash: string; path: string; journeys: TestJourney[] } | null = null;
+  const currentInterfaceHash = (): string => {
+    const signatures = Array.isArray(abi)
+      ? (abi as { type?: string; name?: string; inputs?: { type?: string }[] }[])
+          .filter((entry) => entry?.type === "function")
+          .map((entry) => `${entry.name}(${(entry.inputs ?? []).map((i) => i?.type ?? "").join(",")})`)
+          .sort()
+      : [];
+    return createHash("sha256").update(`${contractName}|${signatures.join(";")}`).digest("hex");
+  };
 
-    status("generating_tests", "Running Foundry invariant tests…");
-    const testRun = await runIntegrationTests(contractName, tr.path);
+  const runIntegrationGate = async (): Promise<{ passed: boolean; errors: string }> => {
+    const interfaceHash = currentInterfaceHash();
+    if (reusableTest && reusableTest.interfaceHash === interfaceHash && creationBytecode) {
+      status("generating_tests", "Interface unchanged — reusing the existing journey tests…");
+      try {
+        await writeFile(
+          path.join(REPO_ROOT, "test", "_codegen", `${contractName}.bin`),
+          Buffer.from(creationBytecode.slice(2), "hex")
+        );
+        integrationTestPath = reusableTest.path;
+        testJourneys = reusableTest.journeys;
+        pushFix({
+          phase: "generating_tests",
+          attempt: attempts,
+          message: `${reusableTest.path} (reused — interface unchanged)`,
+        });
+      } catch {
+        reusableTest = null; // bin refresh failed — fall through to full regeneration
+      }
+    }
+    if (!reusableTest || reusableTest.interfaceHash !== interfaceHash || integrationTestPath === null) {
+      status("generating_tests", "Writing MechanicSpec journey tests (Rule 006)…");
+      const tr = await generateIntegrationTest(contractName, artifactPath, fullSource, apiKey, model, mechanicSpec);
+      testJourneys = tr.journeys;
+      if (!tr.ok) {
+        reusableTest = null;
+        pushFix({ phase: "generating_tests", attempt: attempts, message: tr.errors.slice(0, 200) });
+        return { passed: false, errors: `Integration test generation failed:\n${tr.errors}` };
+      }
+      integrationTestPath = tr.path;
+      reusableTest = { interfaceHash, path: tr.path, journeys: tr.journeys };
+      pushFix({ phase: "generating_tests", attempt: attempts, message: tr.path });
+    }
+
+    const suitePath = integrationTestPath ?? "";
+    status("generating_tests", "Running Foundry fork simulation…");
+    const testRun = await runIntegrationTests(contractName, suitePath);
     integrationTestsPassed = testRun.ok || testRun.skipped === true;
+    simulationReport = buildSimulationReport(contractName, suitePath, testRun.output, testJourneys, testRun);
+    emit?.({ type: "simulation_report", report: simulationReport });
     if (!integrationTestsPassed) {
       previousFailures.add("integration-test-failure");
       pushFix({
@@ -2726,11 +3147,22 @@ async function runCodegenPipeline(opts: {
   const runAuditIfReady = async () => {
     if (!ok || !integrationTestsPassed || specAudit.level !== "skipped") return;
     status("auditing", "Flap pre-audit (advisory)…");
-    specAudit = await runSpecAudit(fullSource, contractName, apiKey, model, {
-      compiled: true,
-      safetyFindings: safety.findings,
-      advisory: true,
-    });
+    try {
+      specAudit = await runSpecAudit(fullSource, contractName, apiKey, advisoryModel, {
+        compiled: true,
+        safetyFindings: safety.findings,
+        advisory: true,
+      });
+    } catch (err) {
+      // Advisory-only: an audit-call failure (bad cheap-model id, provider
+      // hiccup) must never sink a pipeline whose hard gates already passed.
+      specAudit = {
+        level: "warn",
+        summary: `Pre-audit call failed (${err instanceof Error ? err.message : String(err)}) — review manually.`,
+        items: [],
+        mode: "openai",
+      };
+    }
     emit?.({ type: "spec_audit", audit: specAudit });
     pushFix({ phase: "auditing", attempt: attempts, message: `spec: ${specAudit.level} (advisory)` });
   };
@@ -2740,6 +3172,7 @@ async function runCodegenPipeline(opts: {
       messages.push({ role: "user", content: pendingFix });
       pendingFix = null;
     }
+    messages = pruneRetryHistory(messages, messagesHeadLength, fixLog);
 
     attempts++;
     const lastFix = attempts > 1 ? fixLog[fixLog.length - 1] : undefined;
@@ -2759,6 +3192,7 @@ async function runCodegenPipeline(opts: {
       code = gen.code;
       explanation = gen.explanation;
     }
+    lastAssistantOut = lastAssistant;
 
     emit?.({ type: "name", contractName });
     emit?.({ type: "explanation", text: explanation });
@@ -2789,7 +3223,7 @@ async function runCodegenPipeline(opts: {
       }
     }
 
-    safety = scanSafetyCombined(code, fullSource, contractName, safetyPrompt, vaultPlan);
+    safety = scanSafetyCombined(code, fullSource, contractName, safetyPrompt, undefined, mechanicSpec);
     const blocking = safety.findings.filter((f) => f.level === "block");
     if (blocking.length > 0) {
       for (const b of blocking) previousFailures.add(b.rule);
@@ -2807,14 +3241,40 @@ async function runCodegenPipeline(opts: {
         recentSafety.every((f) => f.rule === recentSafety[0]!.rule);
       const sameRuleCount = blocking.filter((b) => previousFailures.has(b.rule)).length;
       pendingFix = stuck || sameRuleCount >= 3
-        ? surgicalSafetyFixPrompt(blocking, recentSafety[0]?.message ?? blocking[0]!.detail, vaultPlan)
+        ? surgicalSafetyFixPrompt(blocking, recentSafety[0]?.message ?? blocking[0]!.detail)
         : stream
-          ? safetyFixPromptStream(blocking, vaultPlan, attempts, [...previousFailures])
-          : safetyFixPrompt(blocking, vaultPlan, attempts, [...previousFailures]);
+          ? safetyFixPromptStream(blocking, attempts, [...previousFailures], mechanicSpec)
+          : safetyFixPrompt(blocking, attempts, [...previousFailures], mechanicSpec);
       continue;
     }
 
-    ({ abi, creationBytecode, bytecodeSize } = await readArtifact(artifactPath));
+    ({ abi, creationBytecode, bytecodeSize, deployedBytecodeSize } = await readArtifact(artifactPath));
+
+    let sizeFinding = deployedSizeFinding(deployedBytecodeSize);
+    if (sizeFinding) {
+      status("compiling", "Deployed bytecode over EIP-170 limit — retrying with --via-ir…");
+      const rescued = await tryViaIRRescue(filePath, artifactPath);
+      if (rescued) {
+        ({ abi, creationBytecode, bytecodeSize, deployedBytecodeSize } = rescued);
+        pushFix({
+          phase: "safety_fix",
+          attempt: attempts,
+          rule: "deployed-bytecode-exceeds-eip170",
+          message: `Recompiled with --via-ir — deployed bytecode now ${deployedBytecodeSize} bytes (under the 24,576-byte limit).`,
+        });
+        sizeFinding = null;
+      }
+    }
+    if (sizeFinding) {
+      previousFailures.add(sizeFinding.rule);
+      pushFix({ phase: "safety_fix", attempt: attempts, rule: sizeFinding.rule, message: sizeFinding.detail });
+      status("fixing", sizeFinding.rule);
+      messages.push({ role: "assistant", content: lastAssistant });
+      pendingFix = stream
+        ? safetyFixPromptStream([sizeFinding], attempts, [...previousFailures], mechanicSpec)
+        : safetyFixPrompt([sizeFinding], attempts, [...previousFailures], mechanicSpec);
+      continue;
+    }
 
     const gate = await runIntegrationGate();
     if (!gate.passed) {
@@ -2830,8 +3290,8 @@ async function runCodegenPipeline(opts: {
       }
       messages.push({ role: "assistant", content: lastAssistant });
       pendingFix = stream
-        ? testFixPromptStream(gate.errors, vaultPlan, attempts, [...previousFailures])
-        : testFixPrompt(gate.errors, vaultPlan, attempts, [...previousFailures]);
+        ? testFixPromptStream(gate.errors, attempts, [...previousFailures], mechanicSpec, failingScenarios())
+        : testFixPrompt(gate.errors, attempts, [...previousFailures], mechanicSpec, failingScenarios());
       continue;
     }
 
@@ -2860,10 +3320,11 @@ async function runCodegenPipeline(opts: {
       messages.push({
         role: "user",
         content: stream
-          ? testFixPromptStream(lastTestErrors, vaultPlan, attempts, [...previousFailures])
-          : testFixPrompt(lastTestErrors, vaultPlan, attempts, [...previousFailures]),
+          ? testFixPromptStream(lastTestErrors, attempts, [...previousFailures], mechanicSpec, failingScenarios())
+          : testFixPrompt(lastTestErrors, attempts, [...previousFailures], mechanicSpec, failingScenarios()),
       });
     }
+    messages = pruneRetryHistory(messages, messagesHeadLength, fixLog);
 
     let lastAssistant: string;
     if (stream && emit) {
@@ -2884,6 +3345,7 @@ async function runCodegenPipeline(opts: {
       code = gen.code;
       explanation = gen.explanation;
     }
+    lastAssistantOut = lastAssistant;
 
     emit?.({ type: "name", contractName });
     emit?.({ type: "explanation", text: explanation });
@@ -2912,7 +3374,7 @@ async function runCodegenPipeline(opts: {
       }
     }
 
-    safety = scanSafetyCombined(code, fullSource, contractName, safetyPrompt, vaultPlan);
+    safety = scanSafetyCombined(code, fullSource, contractName, safetyPrompt, undefined, mechanicSpec);
     const blocking = safety.findings.filter((f) => f.level === "block");
     if (blocking.length > 0) {
       for (const b of blocking) previousFailures.add(b.rule);
@@ -2924,19 +3386,46 @@ async function runCodegenPipeline(opts: {
       });
       messages.push({ role: "assistant", content: lastAssistant });
       pendingFix = stream
-        ? safetyFixPromptStream(blocking, vaultPlan, attempts, [...previousFailures])
-        : safetyFixPrompt(blocking, vaultPlan, attempts, [...previousFailures]);
+        ? safetyFixPromptStream(blocking, attempts, [...previousFailures], mechanicSpec)
+        : safetyFixPrompt(blocking, attempts, [...previousFailures], mechanicSpec);
       continue;
     }
 
-    ({ abi, creationBytecode, bytecodeSize } = await readArtifact(artifactPath));
+    ({ abi, creationBytecode, bytecodeSize, deployedBytecodeSize } = await readArtifact(artifactPath));
+
+    let sizeFinding2 = deployedSizeFinding(deployedBytecodeSize);
+    if (sizeFinding2) {
+      status("compiling", "Deployed bytecode over EIP-170 limit — retrying with --via-ir…");
+      const rescued2 = await tryViaIRRescue(filePath, artifactPath);
+      if (rescued2) {
+        ({ abi, creationBytecode, bytecodeSize, deployedBytecodeSize } = rescued2);
+        pushFix({
+          phase: "safety_fix",
+          attempt: attempts,
+          rule: "deployed-bytecode-exceeds-eip170",
+          message: `Recompiled with --via-ir — deployed bytecode now ${deployedBytecodeSize} bytes (under the 24,576-byte limit).`,
+        });
+        sizeFinding2 = null;
+      }
+    }
+    if (sizeFinding2) {
+      previousFailures.add(sizeFinding2.rule);
+      pushFix({ phase: "safety_fix", attempt: attempts, rule: sizeFinding2.rule, message: sizeFinding2.detail });
+      status("fixing", sizeFinding2.rule);
+      messages.push({ role: "assistant", content: lastAssistant });
+      pendingFix = stream
+        ? safetyFixPromptStream([sizeFinding2], attempts, [...previousFailures], mechanicSpec)
+        : safetyFixPrompt([sizeFinding2], attempts, [...previousFailures], mechanicSpec);
+      continue;
+    }
+
     const gate = await runIntegrationGate();
     if (!gate.passed) {
       lastTestErrors = gate.errors;
       messages.push({ role: "assistant", content: lastAssistant });
       pendingFix = stream
-        ? testFixPromptStream(gate.errors, vaultPlan, attempts, [...previousFailures])
-        : testFixPrompt(gate.errors, vaultPlan, attempts, [...previousFailures]);
+        ? testFixPromptStream(gate.errors, attempts, [...previousFailures], mechanicSpec, failingScenarios())
+        : testFixPrompt(gate.errors, attempts, [...previousFailures], mechanicSpec, failingScenarios());
       continue;
     }
     break;
@@ -2946,6 +3435,266 @@ async function runCodegenPipeline(opts: {
 
   if (!fullSource && code) fullSource = `${PREAMBLE}\n${code.trim()}\n`;
 
+  // Phase 7: advisory economic critic — only worth running on a vault that
+  // actually compiled and passed the deterministic safety scanners; never
+  // blocks the pipeline and never overrides scanSafety/integration results.
+  let economicCritique: EconomicCriticReport | null = null;
+  if (ok && safety.level !== "fail" && fullSource) {
+    economicCritique = await runEconomicCriticPass(contractName, fullSource, mechanicSpec, apiKey, advisoryModel);
+    emit?.({ type: "economic_critique", report: economicCritique });
+  }
+
+  // Cleanup pass: bounded critic-driven auto-repair. High/blocking critic
+  // findings (with any remaining test failures folded into the same context)
+  // trigger repair attempts BEFORE the final result. The critic stays advisory
+  // for launch gating — a repair that regresses any hard gate (compile /
+  // scanners / tests) is rolled back to the last good state.
+  if (ok && safety.level !== "fail" && shouldTriggerCriticRepair(economicCritique)) {
+    const escalationModel = resolveEscalationModel();
+    const maxRepairs = MAX_CRITIC_REPAIR_ATTEMPTS + (escalationModel ? 1 : 0);
+
+    while (repairAttempts.length < maxRepairs && shouldTriggerCriticRepair(economicCritique)) {
+      const repairNum = repairAttempts.length + 1;
+      const escalated = repairNum > MAX_CRITIC_REPAIR_ATTEMPTS && escalationModel !== null;
+      const repairModel = escalated ? escalationModel! : model;
+      const findings = selectRepairFindings(economicCritique);
+      const testErrors = integrationTestsPassed ? "" : lastTestErrors;
+      const reason = repairReason(findings.length > 0, !integrationTestsPassed);
+
+      attempts++;
+      status(
+        "fixing",
+        `Economic repair attempt ${repairNum}/${maxRepairs}${escalated ? " (escalation model)" : ""}: ${findings
+          .map((f) => f.finding)
+          .slice(0, 3)
+          .join(", ")}`
+      );
+      pushFix({
+        phase: "critic_repair",
+        attempt: attempts,
+        rule: findings.map((f) => f.finding).join(","),
+        message: `Repair ${repairNum}/${maxRepairs}${escalated ? " [escalated]" : ""}: ${findings[0]?.explanation.slice(0, 160) ?? "critic findings"}`,
+      });
+
+      // Snapshot the current hard-gate-passing state so a bad repair can be rolled back.
+      const snapshot = {
+        code,
+        fullSource,
+        contractName,
+        explanation,
+        abi,
+        creationBytecode,
+        bytecodeSize,
+        deployedBytecodeSize,
+        safety,
+        compileErrors,
+        integrationTestsPassed,
+        simulationReport,
+        integrationTestPath,
+      };
+
+      const basePrompt = buildCriticRepairPrompt({
+        contractName,
+        findings,
+        mechanicSpec,
+        attempt: repairNum,
+        escalated,
+        testErrors,
+        failingScenarioSummary: formatFailingScenarios(failingScenarios()),
+        compiled: ok,
+        scannersPassed: safety.level !== "fail",
+        testsPassed: integrationTestsPassed,
+      });
+      messages.push({ role: "assistant", content: lastAssistantOut });
+      messages.push({
+        role: "user",
+        content: stream
+          ? `${basePrompt}\n\nRe-output in the SAME plain-text format (CONTRACT_NAME / EXPLANATION / SOLIDITY).`
+          : `${basePrompt}\n\nReturn the corrected JSON (same shape, no imports/pragma).`,
+      });
+      messages = pruneRetryHistory(messages, messagesHeadLength, fixLog);
+
+      if (stream && emit) {
+        const gen = await aiGenerateStream(client, repairModel, messages, emit, attempts, {
+          phase: "critic_repair",
+          attempt: attempts,
+          message: `Economic repair attempt ${repairNum}`,
+        });
+        lastAssistantOut = gen.raw;
+        contractName = gen.contractName;
+        code = gen.code;
+        explanation = gen.explanation || explanation;
+      } else {
+        const gen = await aiGenerateJson(client, repairModel, messages);
+        lastAssistantOut = gen.raw;
+        contractName = gen.contractName;
+        code = gen.code;
+        explanation = gen.explanation;
+      }
+      emit?.({ type: "name", contractName });
+      code = applyCommonCodegenPatches(code);
+
+      const attemptRecord: RepairAttempt = {
+        attempt: repairNum,
+        reason,
+        model: repairModel,
+        escalated,
+        findingsAddressed: findings.map((f) => f.finding),
+        compileResult: "fail",
+        scannerResult: "skip",
+        testResult: "skip",
+        criticResult: "not_rerun",
+        remainingIssues: [],
+      };
+
+      const rollback = () => {
+        ({
+          code,
+          fullSource,
+          contractName,
+          explanation,
+          abi,
+          creationBytecode,
+          bytecodeSize,
+          deployedBytecodeSize,
+          safety,
+          compileErrors,
+          integrationTestsPassed,
+          simulationReport,
+          integrationTestPath,
+        } = snapshot);
+        ok = true;
+      };
+
+      status("compiling");
+      const res = await compile(contractName, code);
+      if (!res.ok) {
+        attemptRecord.remainingIssues = ["repair attempt did not compile — rolled back to previous good code"];
+        repairAttempts.push(attemptRecord);
+        pushFix({ phase: "critic_repair", attempt: attempts, message: `Repair ${repairNum} failed to compile — rolled back.` });
+        rollback();
+        continue;
+      }
+      attemptRecord.compileResult = "pass";
+      artifactPath = res.artifactPath;
+      filePath = res.filePath;
+      compileErrors = "";
+
+      let repairedFullSource = `${PREAMBLE}\n${code.trim()}\n`;
+      if (filePath) {
+        try {
+          repairedFullSource = await readFile(filePath, "utf8");
+        } catch {
+          /* use in-memory */
+        }
+      }
+
+      const repairedSafety = scanSafetyCombined(code, repairedFullSource, contractName, safetyPrompt, undefined, mechanicSpec);
+      if (repairedSafety.level === "fail") {
+        attemptRecord.scannerResult = "fail";
+        attemptRecord.remainingIssues = ["repair attempt tripped deterministic scanners — rolled back to previous good code"];
+        repairAttempts.push(attemptRecord);
+        pushFix({ phase: "critic_repair", attempt: attempts, message: `Repair ${repairNum} tripped scanners — rolled back.` });
+        rollback();
+        continue;
+      }
+      attemptRecord.scannerResult = "pass";
+      safety = repairedSafety;
+      fullSource = repairedFullSource;
+      ({ abi, creationBytecode, bytecodeSize, deployedBytecodeSize } = await readArtifact(artifactPath));
+
+      let repairSizeFinding = deployedSizeFinding(deployedBytecodeSize);
+      if (repairSizeFinding) {
+        const rescued3 = await tryViaIRRescue(filePath, artifactPath);
+        if (rescued3) {
+          ({ abi, creationBytecode, bytecodeSize, deployedBytecodeSize } = rescued3);
+          pushFix({
+            phase: "critic_repair",
+            attempt: attempts,
+            message: `Repair ${repairNum}: recompiled with --via-ir — deployed bytecode now ${deployedBytecodeSize} bytes.`,
+          });
+          repairSizeFinding = null;
+        }
+      }
+      if (repairSizeFinding) {
+        attemptRecord.scannerResult = "fail";
+        attemptRecord.remainingIssues = [
+          "repair attempt grew deployed bytecode past the EIP-170 limit — rolled back to previous good code",
+        ];
+        repairAttempts.push(attemptRecord);
+        pushFix({
+          phase: "critic_repair",
+          attempt: attempts,
+          message: `Repair ${repairNum} exceeded EIP-170 deployed size — rolled back.`,
+        });
+        rollback();
+        continue;
+      }
+
+      const gate = await runIntegrationGate();
+      if (!gate.passed) {
+        // Tests regressed (or stayed failing): only roll back when the snapshot had passing tests.
+        attemptRecord.testResult = "fail";
+        if (snapshot.integrationTestsPassed) {
+          attemptRecord.remainingIssues = ["repair attempt broke integration tests — rolled back to previous good code"];
+          repairAttempts.push(attemptRecord);
+          pushFix({ phase: "critic_repair", attempt: attempts, message: `Repair ${repairNum} broke tests — rolled back.` });
+          rollback();
+          continue;
+        }
+        lastTestErrors = gate.errors;
+      } else {
+        attemptRecord.testResult = "pass";
+      }
+
+      // Rerun the critic on the accepted repaired code so the loop (and the
+      // final report) reflect the new state.
+      economicCritique = await runEconomicCriticPass(contractName, fullSource, mechanicSpec, apiKey, advisoryModel);
+      emit?.({ type: "economic_critique", report: economicCritique });
+      attemptRecord.criticResult = shouldTriggerCriticRepair(economicCritique) ? "findings_remain" : "clean";
+      attemptRecord.remainingIssues = summarizeRemainingIssues(
+        economicCritique,
+        true,
+        safety.level !== "fail",
+        integrationTestsPassed
+      );
+      repairAttempts.push(attemptRecord);
+      pushFix({
+        phase: "critic_repair",
+        attempt: attempts,
+        message:
+          attemptRecord.criticResult === "clean"
+            ? `Repair ${repairNum} accepted — critic clean.`
+            : `Repair ${repairNum} accepted — ${attemptRecord.remainingIssues.length} issue(s) remain.`,
+      });
+    }
+  }
+
+  // Final, sticky safeguard: if the retry budget was exhausted while the vault was
+  // still over the EIP-170 deployed-code limit, the result must never report
+  // safety as passing — regardless of which loop/attempt last touched `safety`.
+  const finalSizeFinding = deployedSizeFinding(deployedBytecodeSize);
+  if (finalSizeFinding && !safety.findings.some((f) => f.rule === finalSizeFinding.rule)) {
+    safety = { level: "fail", findings: [...safety.findings, finalSizeFinding] };
+  }
+
+  // ── Custom vault UI pass (advisory) — only for fully-passing vaults. The
+  //    artifact renders sandboxed on our site immediately and is the same file
+  //    a user submits to Flap's Artifact Workbench for flap.sh binding.
+  let uiArtifact: VaultUiArtifact | null = null;
+  if (ok && safety.level !== "fail" && integrationTestsPassed) {
+    emit?.({ type: "status", phase: "ui_gen", attempt: attempts, message: "Designing the custom vault UI…" });
+    uiArtifact = await generateVaultUi({ client, model, contractName, source: fullSource, spec: mechanicSpec });
+    emit?.({
+      type: "status",
+      phase: "ui_gen",
+      attempt: attempts,
+      message: uiArtifact
+        ? `Custom UI ready (${Math.round(uiArtifact.bytes / 1024)} KB).`
+        : "Custom UI pass skipped (generation failed) — the standard schema panel will be used.",
+    });
+  }
+
   return {
     contractName,
     explanation,
@@ -2954,14 +3703,24 @@ async function runCodegenPipeline(opts: {
     compileErrors,
     safety,
     specAudit,
-    vaultPlan,
+    mechanicSpec,
+    scope,
+    deliverable: "contract",
+    approximation,
+    designQuestions,
+    designDecisions,
     abi,
     creationBytecode,
     bytecodeSize,
+    deployedBytecodeSize,
     attempts,
     integrationTestPath,
     integrationTestsPassed,
+    simulationReport,
+    economicCritique,
+    repairAttempts,
     fixLog,
+    uiArtifact,
     autoFixExhausted:
       (attempts >= MAX_PIPELINE_ATTEMPTS && safety.level === "fail") ||
       (ok &&
@@ -2973,10 +3732,24 @@ async function runCodegenPipeline(opts: {
 }
 
 function pipelineSuccess(result: CodegenResult): boolean {
+  // Phase 6: consent stops and spec-only drafts are deliberate, successful outcomes.
+  if (result.deliverable !== "contract") return result.deliverable !== "refused_unsafe";
   return result.compiled && result.safety.level !== "fail" && result.integrationTestsPassed;
 }
 
 function pipelineFinishMessage(result: CodegenResult): string | undefined {
+  if (result.deliverable === "consent_required") {
+    return "This idea is not launch-ready as requested — choose how to proceed before generation.";
+  }
+  if (result.deliverable === "design_questions") {
+    return "A few design decisions are missing — answer the plain-English questions (or pick safe defaults) before code is generated.";
+  }
+  if (result.deliverable === "spec_only") {
+    return "Draft spec delivered (no contract generated, per your choice).";
+  }
+  if (result.deliverable === "refused_unsafe") {
+    return "Not generated: the mechanic is unsafe or cannot be honestly disclosed.";
+  }
   if (result.autoFixExhausted && result.safety.level === "fail") {
     return "Auto-fix exhausted — safety scanner still blocking.";
   }
@@ -2991,27 +3764,41 @@ function pipelineFinishMessage(result: CodegenResult): string | undefined {
 export async function generateVaultCode(
   prompt: string,
   apiKey: string | undefined,
-  model: string
+  model: string,
+  approximationConsent?: ApproximationConsent
 ): Promise<CodegenResult> {
   if (!apiKey) {
     return stubResult(prompt);
   }
 
-  const { default: OpenAI } = await import("openai");
-  const client = new OpenAI({ apiKey });
+  const { createAiClient } = await import("./ai-client.js");
+  const client = createAiClient(apiKey);
 
-  const result = await runCodegenPipeline({
-    client,
-    model,
-    apiKey,
-    userPrompt: prompt,
-    systemPrompt: CODEGEN_SYSTEM_PROMPT,
-    stream: false,
-  });
+  const tokenUsage = createAiUsageTotals();
+  const result = await runWithAiUsage(tokenUsage, () =>
+    runCodegenPipeline({
+      client,
+      model,
+      apiKey,
+      userPrompt: prompt,
+      systemPrompt: CODEGEN_SYSTEM_PROMPT,
+      stream: false,
+      approximationConsent,
+    })
+  );
 
   await cleanupCodegen();
+  logAiUsage(tokenUsage);
 
-  return { ...result, mode: "openai" };
+  return { ...result, mode: "openai", tokenUsage };
+}
+
+function logAiUsage(usage: AiUsageTotals): void {
+  const cost = usage.estCostUsd !== null ? ` ~$${usage.estCostUsd.toFixed(4)}` : "";
+  console.log(
+    `[ai-usage] calls=${usage.calls} in=${usage.inputTokens} out=${usage.outputTokens} ` +
+      `cacheRead=${usage.cacheReadInputTokens} cacheWrite=${usage.cacheWriteInputTokens}${cost}`
+  );
 }
 
 function sanitizeName(name: string): string {
@@ -3055,7 +3842,8 @@ export async function generateVaultCodeStream(
   prompt: string,
   apiKey: string | undefined,
   model: string,
-  emit: (ev: CodegenEvent) => void
+  emit: (ev: CodegenEvent) => void,
+  approximationConsent?: ApproximationConsent
 ): Promise<void> {
   if (!apiKey) {
     const stub = stubResult(prompt);
@@ -3064,23 +3852,28 @@ export async function generateVaultCodeStream(
     return;
   }
 
-  const { default: OpenAI } = await import("openai");
-  const client = new OpenAI({ apiKey });
+  const { createAiClient } = await import("./ai-client.js");
+  const client = createAiClient(apiKey);
 
   try {
-    const result = await runCodegenPipeline({
-      client,
-      model,
-      apiKey,
-      userPrompt: prompt,
-      systemPrompt: STREAM_SYSTEM_PROMPT,
-      stream: true,
-      emit,
-    });
+    const tokenUsage = createAiUsageTotals();
+    const result = await runWithAiUsage(tokenUsage, () =>
+      runCodegenPipeline({
+        client,
+        model,
+        apiKey,
+        userPrompt: prompt,
+        systemPrompt: STREAM_SYSTEM_PROMPT,
+        stream: true,
+        emit,
+        approximationConsent,
+      })
+    );
 
     await cleanupCodegen();
+    logAiUsage(tokenUsage);
 
-    const full: CodegenResult = { ...result, mode: "openai" };
+    const full: CodegenResult = { ...result, mode: "openai", tokenUsage };
     emit({
       type: "status",
       phase: pipelineSuccess(full) ? "done" : "error",
@@ -3108,8 +3901,8 @@ export async function generateVaultCodeRefineStream(
     return;
   }
 
-  const { default: OpenAI } = await import("openai");
-  const client = new OpenAI({ apiKey });
+  const { createAiClient } = await import("./ai-client.js");
+  const client = createAiClient(apiKey);
 
   const scanPrompt = `${session.initialPrompt}\n${message}`;
   const refineSystem = REFINE_STREAM_SYSTEM_PROMPT;
@@ -3118,21 +3911,25 @@ export async function generateVaultCodeRefineStream(
   try {
     emit({ type: "status", phase: "writing", attempt: 0, message: "Applying your refinement…" });
 
-    const result = await runCodegenPipeline({
-      client,
-      model,
-      apiKey,
-      userPrompt: session.initialPrompt,
-      systemPrompt: refineSystem,
-      stream: true,
-      emit,
-      seedMessages,
-      scanPrompt,
-    });
+    const tokenUsage = createAiUsageTotals();
+    const result = await runWithAiUsage(tokenUsage, () =>
+      runCodegenPipeline({
+        client,
+        model,
+        apiKey,
+        userPrompt: session.initialPrompt,
+        systemPrompt: refineSystem,
+        stream: true,
+        emit,
+        seedMessages,
+        scanPrompt,
+      })
+    );
 
     await cleanupCodegen();
+    logAiUsage(tokenUsage);
 
-    const full: CodegenResult = { ...result, mode: "openai" };
+    const full: CodegenResult = { ...result, mode: "openai", tokenUsage };
     emit({
       type: "status",
       phase: pipelineSuccess(full) ? "done" : "error",
@@ -3160,19 +3957,22 @@ Errors:
 ${errors}`;
 }
 
+/** Phase 4: failure memory cites Rule IDs, finding names, and the MechanicSpec — never a vault kind. */
 function buildFailureMemoryJson(
-  vaultPlan: VaultPlan,
   attempt: number,
   previousFailures: string[],
-  currentlyBlocking: { id: string; reason: string; sourceScope?: string }[]
+  currentlyBlocking: { id: string; reason: string; sourceScope?: string }[],
+  mechanicSpec?: MechanicSpec
 ): string {
   return JSON.stringify(
     {
       attempt,
-      vaultKind: vaultPlan.kind,
       previousFailures,
-      currentlyBlocking,
-      nonNegotiableInvariants: getVaultKindInvariants(vaultPlan.kind),
+      currentlyBlocking: currentlyBlocking.map((b) => ({
+        ...b,
+        flapRule: formatRuleLabel(mapScannerFindingToRuleId(b.id)),
+      })),
+      ...(mechanicSpec ? { mechanicSpec: summarizeMechanicSpec(mechanicSpec) } : {}),
     },
     null,
     2
@@ -3181,17 +3981,24 @@ function buildFailureMemoryJson(
 
 function safetyFixPrompt(
   blocking: SafetyFinding[],
-  vaultPlan: VaultPlan,
   attempt: number,
-  previousFailures: string[]
+  previousFailures: string[],
+  mechanicSpec?: MechanicSpec
 ): string {
   const currentlyBlocking = blocking.map((f) => ({
     id: f.rule,
     reason: f.detail,
     sourceScope: f.sourceScope,
   }));
-  const memory = buildFailureMemoryJson(vaultPlan, attempt, previousFailures, currentlyBlocking);
-  const list = blocking.map((f) => `- [${f.rule}${f.sourceScope ? `/${f.sourceScope}` : ""}] ${f.detail}`).join("\n");
+  const memory = buildFailureMemoryJson(attempt, previousFailures, currentlyBlocking, mechanicSpec);
+  const grouped = groupFindingsByRule(blocking);
+  const list = grouped
+    .map(
+      (g) =>
+        `${g.label}:\n${g.findings.map((f) => `- [${f.rule}${f.sourceScope ? `/${f.sourceScope}` : ""}] ${f.detail}`).join("\n")}`
+    )
+    .join("\n");
+  const ruleGuidance = formatRuleFixGuidance(grouped.map((g) => g.ruleId));
   const missingState = blocking
     .filter((f) => f.rule === "public-state-not-in-uischema")
     .map((f) => f.detail)
@@ -3199,27 +4006,72 @@ function safetyFixPrompt(
   const uischemaHint = missingState
     ? `\nFor public-state-not-in-uischema: add a vaultUISchema view method for EACH variable listed above.\n${missingState}\n`
     : "";
+  const schemaIntegrityHint = blocking.some((f) => f.rule === "schema-method-not-implemented")
+    ? `\nFor schema-method-not-implemented: either IMPLEMENT the missing function body, or REMOVE it from vaultUISchema.methods. Never list a method name without a matching function/public var.\n`
+    : "";
+  const timeUntilHint = blocking.some((f) =>
+    /missing-time-until-view|time-until-not-in-uischema/.test(f.rule)
+  )
+    ? `\nFor time-until issues: add a view returning seconds remaining until the next scheduled action (e.g. function timeUntilNextExecution() public view returns (uint256)) and list it in vaultUISchema.methods so Flap shows a countdown.\n`
+    : "";
+  const triggerHint = blocking.some(
+    (f) => f.rule === "write-method-not-in-uischema" || f.rule === "design-schema-method-missing"
+  )
+    ? `\nFor missing write/trigger methods: any external user action or mechanism trigger (advance*, execute*, request*, etc.) MUST appear in vaultUISchema.methods (isWriteMethod=true) — including onlyManager triggers so users see the mechanism exists.\n`
+    : "";
+  const economicPayoutHint = blocking.some((f) =>
+    /first-claimer-can-drain-shared-pool|approval-without-reserved-liability|claim-amount-from-global-bucket-without-winner-semantics|multi-user-payout-without-per-user-accounting|approval-not-linked-to-submitted-state|event-only-user-action-without-trust-disclosure/.test(
+      f.rule
+    )
+  )
+    ? `\nFor economic/multi-user payout issues (Phase 7):
+- Do NOT pay the full shared bucket to whichever eligible address claims first — add a per-user liability mapping (e.g. mapping(address => uint256) public claimableRewards) and pay only claimableRewards[msg.sender].
+- Reserve/credit the reward amount at approval/eligibility time, not at claim time: e.g. \`rewardBucket -= amount; claimableRewards[user] += amount;\` inside the manager approval function.
+- Make approval consume or reference the submitted state (e.g. store latestProofHash[user] = keccak256(proof) on submission and check it in approval), or explicitly disclose in description()/vaultUISchema that review is off-chain from event logs.
+- Only pay the entire bucket to a single caller when the mechanic is genuinely winner-takes-all — in that case say so explicitly in description() and never leave a per-user eligibility mapping that implies more than one recipient.
+- Add a view for the caller's own claimable amount and (if relevant) submission/approval status so the Flap UI can show it.
+- Keep receive() cheap (Rule 005), keep bilingual require() strings (Rule 004), and always update state (zero claimableRewards[msg.sender]) BEFORE the native transfer.\n`
+    : "";
+  const lifecycleHint = blocking.some((f) =>
+    /single-resource-multiple-acceptance|accepted-user-can-become-stuck|no-abandon-or-cancel-path|inactive-resource-blocks-user-state|shared-resource-deactivated-while-users-assigned|manager-completion-without-assignee-check|manager-finalization-without-submission|manager-finalization-without-timeout|holder-wording-without-holder-check|hardcoded-economic-constant-without-spec|unbounded-array-return-in-ui-schema|missing-user-status-view|resource-state-not-queryable|assignment-model-missing|reward-amount-not-specified/.test(
+      f.rule
+    )
+  )
+    ? `\nFor lifecycle / assignment / stuck-state issues (Phase 8):
+- Do not let multiple users accept a single-assignee resource — set the assignee on accept and revert when the resource is already taken; add per-user assignment tracking (e.g. mapping(address => uint256) acceptedResourceOf) when users attach to resources.
+- Use a status ENUM (e.g. Open, Assigned, Submitted, Completed, Cancelled) instead of one bool when the resource has multiple lifecycle states, and make each transition explicit.
+- Add BOTH exit paths: an abandon function (the assignee clears their own assignment before approval) and a manager cancel function for open/expired resources — and never deactivate a shared resource in a way that traps other assigned users (clear or honor their assignment state on deactivation).
+- Add proof submission if completion depends on user work (store a proofHash the approval verifies); the manager approval must verify the approved address IS the assignee before crediting anything.
+- Reserve the reward into claimable[user] at approval time (\`rewardBucket -= amount; claimable[user] += amount;\`) — never invent a hardcoded reward constant the spec did not decide; make the amount per-resource (set by the manager when posting).
+- Add views for user assignment, claimable balance, resource status (count + per-id getter), and the reward bucket — avoid unbounded array returns in vaultUISchema-facing views (use count + per-id getters or pagination).
+- Enforce holder eligibility (balanceOf(msg.sender) > 0 gate) if the description says "holders", or fix the wording.
+- Target safe single-assignee shape (adapt names to the mechanic): enum Status {Open, Assigned, Submitted, Completed, Cancelled}; struct with description, rewardAmount, assignee, proofHash, deadline, status; post(description, rewardAmount, deadline) [manager]; accept(id) sets assignee+status; submitProof(id, proofHash); approve(user, id) verifies assignee+proofHash then reserves into claimable[user]; abandon(id) lets the assignee exit before approval; cancel(id) [manager] for open/expired; claim() pays only claimable[msg.sender]; views: count, get(id), getAccepted(user), getClaimable(user), rewardBucket.
+- Keep receive() cheap (Rule 005), preserve bilingual require() strings (Rule 004), and keep state updates BEFORE native transfers.\n`
+    : "";
   const repeated = previousFailures.filter((r) => blocking.some((b) => b.rule === r));
   const repeatNote =
     repeated.length > 0
       ? `\nThese rules failed in previous attempts: ${[...new Set(repeated)].join(", ")}. Do not make a superficial edit — change the underlying logic.\n`
       : "";
-  return `You are repairing a generated ${vaultPlan.kind} vault. Do not rewrite unrelated architecture. But DO re-check the entire vault-kind lifecycle before returning code.
+  return `You are repairing a generated Flap vault that violates the Flap constitution (Rules 001–009). Do not rewrite unrelated architecture, but DO re-check the complete mechanic lifecycle before returning code.
 
-Do not only patch the visible failing line. Re-evaluate the whole vault kind against all invariants before returning code.
+Do not only patch the visible failing line. Fix the underlying rule violation.
+
+Rule-specific fixes for the violated rules:
+${ruleGuidance}
 
 Failure memory:
 ${memory}
 ${repeatNote}
 Before returning code, verify:
 - all previous blocking findings are fixed
-- no new issue from the same vault-kind checklist is introduced
+- no new violation of the same Flap rules is introduced
 - UI schema matches functions/events
 - no forbidden wording remains
-${uischemaHint}
+${uischemaHint}${schemaIntegrityHint}${timeUntilHint}${triggerHint}${economicPayoutHint}${lifecycleHint}
 Return the corrected JSON (same shape, no imports/pragma).
 
-Blocking issues:
+Blocking issues (grouped by Flap rule):
 
 ${list}`;
 }
@@ -3236,28 +4088,48 @@ ${errors}`;
 
 function safetyFixPromptStream(
   blocking: SafetyFinding[],
-  vaultPlan: VaultPlan,
   attempt: number,
-  previousFailures: string[]
+  previousFailures: string[],
+  mechanicSpec?: MechanicSpec
 ): string {
-  return `${safetyFixPrompt(blocking, vaultPlan, attempt, previousFailures)}\n\nRe-output in the SAME plain-text format (CONTRACT_NAME / EXPLANATION / SOLIDITY).`;
+  return `${safetyFixPrompt(blocking, attempt, previousFailures, mechanicSpec)}\n\nRe-output in the SAME plain-text format (CONTRACT_NAME / EXPLANATION / SOLIDITY).`;
+}
+
+/** Phase 5: cite failing simulation scenarios (spec action + Rule IDs + expected behavior), never a vault kind. */
+function formatFailingScenarios(scenarios: SimulationScenarioResult[]): string {
+  if (scenarios.length === 0) return "";
+  const lines = scenarios.slice(0, 6).map((s) => {
+    const rules = s.ruleIds.map((id) => formatRuleLabel(id)).join("; ");
+    const methods = s.methods.length ? ` MechanicSpec method(s): ${s.methods.join(", ")}.` : "";
+    return `- Fix failing scenario \`${s.scenario}\` (actor: ${s.actor}).${methods}
+  Expected: ${s.expected}
+  Actual: ${s.actual}${s.failureSummary ? `\n  Failure: ${s.failureSummary.slice(0, 300)}` : ""}
+  Rules involved: ${rules}.`;
+  });
+  return `\nFailing simulation scenarios (fix the CONTRACT so each expected behavior holds):\n${lines.join("\n")}\n`;
 }
 
 function testFixPrompt(
   errors: string,
-  vaultPlan: VaultPlan,
   attempt: number,
-  previousFailures: string[]
+  previousFailures: string[],
+  mechanicSpec?: MechanicSpec,
+  failedScenarios: SimulationScenarioResult[] = []
 ): string {
-  const memory = buildFailureMemoryJson(vaultPlan, attempt, previousFailures, [
-    { id: "integration-test-failure", reason: errors.slice(0, 500) },
-  ]);
-  return `Foundry integration/invariant tests failed for this ${vaultPlan.kind} vault. Fix the vault logic (not the test file) and return corrected JSON (same shape, no imports/pragma).
+  const memory = buildFailureMemoryJson(
+    attempt,
+    previousFailures,
+    [{ id: "integration-test-failure", reason: errors.slice(0, 500) }],
+    mechanicSpec
+  );
+  return `Foundry integration tests failed (${formatRuleLabel("006")}). Fix the vault logic (not the test file) and return corrected JSON (same shape, no imports/pragma).
 
+${formatRuleFixGuidance(["006"])}
+${formatFailingScenarios(failedScenarios)}
 Failure memory:
 ${memory}
 
-Do not only patch the visible failing line. Re-evaluate the entire ${vaultPlan.kind} lifecycle against all invariants.
+Do not only patch the visible failing line. Re-evaluate the complete mechanic lifecycle against the MechanicSpec and the Flap constitution before returning code.
 
 Test errors:
 ${errors.slice(0, 3000)}`;
@@ -3265,38 +4137,40 @@ ${errors.slice(0, 3000)}`;
 
 function testFixPromptStream(
   errors: string,
-  vaultPlan: VaultPlan,
   attempt: number,
-  previousFailures: string[]
+  previousFailures: string[],
+  mechanicSpec?: MechanicSpec,
+  failedScenarios: SimulationScenarioResult[] = []
 ): string {
-  return `${testFixPrompt(errors, vaultPlan, attempt, previousFailures)}\n\nRe-output in the SAME plain-text format (CONTRACT_NAME / EXPLANATION / SOLIDITY).`;
+  return `${testFixPrompt(errors, attempt, previousFailures, mechanicSpec, failedScenarios)}\n\nRe-output in the SAME plain-text format (CONTRACT_NAME / EXPLANATION / SOLIDITY).`;
 }
 
-function surgicalSafetyFixPrompt(
-  blocking: SafetyFinding[],
-  repeatedMessage: string,
-  vaultPlan: VaultPlan
-): string {
-  const list = blocking.map((f) => `- [${f.rule}] ${f.detail}`).join("\n");
-  const invariants = getVaultKindInvariants(vaultPlan.kind).map((i) => `- ${i}`).join("\n");
+function surgicalSafetyFixPrompt(blocking: SafetyFinding[], repeatedMessage: string): string {
+  const grouped = groupFindingsByRule(blocking);
+  const ruleIds = grouped.map((g) => g.ruleId);
+  const list = grouped
+    .map((g) => `${g.label}:\n${g.findings.map((f) => `- [${f.rule}] ${f.detail}`).join("\n")}`)
+    .join("\n");
+  const ruleGuidance = formatRuleFixGuidance(ruleIds);
   return `You have failed to fix the same blocking issue multiple times: "${repeatedMessage}".
 
-Vault kind: ${vaultPlan.kind}. This rule has failed in previous attempts. Do not make a superficial edit. Change the underlying logic.
+The violated Flap constitution rules are: ${ruleIds.map((id) => formatRuleLabel(id)).join("; ")}. Do not make a superficial edit. Change the underlying logic so the rule is satisfied.
 
-Re-output the FULL contract in plain-text format (CONTRACT_NAME / EXPLANATION / SOLIDITY). Re-check ALL invariants:
-${invariants}
+Rule-specific fixes (apply the ones matching the violated rules):
+${ruleGuidance}
 
-Apply these exact fixes if relevant:
-1. Inside _fulfillReasoning, after crediting claimablePrize and clearing entrants/drawSnapshot, add: lastDrawFee = 0;
-2. Inside requestDraw, use require(jackpot > fee) not >=; before uint8(n): require(n > 0 && n <= type(uint8).max, ...); emit DrawRequested after p.reason
-3. _onFlapAIRequestRefunded must: emit DrawRefunded(requestId, lastDrawFee); pendingRequestId = 0; jackpot += lastDrawFee; lastDrawFee = 0; delete drawSnapshot;
-4. Use claimablePrize[winner] += prize and claimPrize() — never _sendNative(winner) in _fulfillReasoning
-5. Staking: claim or preserve pending BEFORE user.amount +=; pendingReward must match claimReward accounting
-6. Survivor _fulfillReasoning: loop drawSnapshot to rebuild entrants BEFORE delete drawSnapshot; use survivors == 1 not drawSnapshot.length == 1
-7. receive() MUST NOT call _buyAndBurn — split msg.value into buybackBudget and weeklyJackpot in receive(); add executeBuyback(uint256 minTokensOut) onlyManager that drains buybackBudget via _buyAndBurn(amt, minTokensOut) with minTokensOut > 0
-8. enter() MUST cap entrants: MAX_ENTRANTS = 255 and require(entrants.length < MAX_ENTRANTS) — not only at requestDraw
+Known concrete remedies — apply ONLY where your code contains the matching pattern:
+- If a fulfill/refund callback escrows a request fee: clear the fee exactly once on fulfill AND on refund; refund restores the escrowed amount once (never doubled), and clears any frozen snapshot.
+- If an oracle request casts a count to uint8: require(n > 0 && n <= type(uint8).max, ...) before the cast, and require the funding bucket strictly exceeds the fee.
+- If a callback pays winners: credit a claimable mapping (pull payment) — never _sendNative(winner) inside the callback.
+- If users accrue rewards against a share index: settle or preserve pending amounts BEFORE changing the user's balance, and keep the pending view consistent with what claim pays.
+- If an elimination flow rebuilds a participant list from a snapshot: rebuild BEFORE deleting the snapshot, and count remaining participants instead of testing the snapshot's length.
+- If receive() performs a swap/burn/payout: move it to a separate manager function that drains a named bucket with real slippage protection; receive() only does bucket accounting.
+- If an unbounded participant array feeds an oracle request: cap entries at join time (e.g. max 255), not only at request time.
 
-Blocking issues still present:
+Re-output the FULL contract in plain-text format (CONTRACT_NAME / EXPLANATION / SOLIDITY).
+
+Blocking issues still present (grouped by Flap rule):
 
 ${list}`;
 }
@@ -3338,8 +4212,7 @@ function stubResult(prompt: string): CodegenResult {
     }
 }`;
   const contractName = "GeneratedVault";
-  const vaultPlan = inferVaultPlanFromPrompt(prompt);
-  const safety = scanSafety(body, contractName, prompt, { vaultPlan });
+  const safety = scanSafety(body, contractName, prompt);
   return {
     contractName,
     explanation: `Stub for "${prompt.slice(0, 80)}" — set OPENAI_API_KEY for real AI codegen.`,
@@ -3353,15 +4226,26 @@ function stubResult(prompt: string): CodegenResult {
       items: [],
       mode: "skipped",
     },
-    vaultPlan,
+    mechanicSpec: inferMechanicSpecFromPrompt(prompt),
+    scope: inferVaultScopeFromPrompt(prompt),
+    deliverable: "contract",
+    approximation: null,
+    designQuestions: [],
+    designDecisions: [],
     abi: null,
     creationBytecode: null,
     bytecodeSize: null,
+    deployedBytecodeSize: null,
     attempts: 0,
     integrationTestPath: null,
     integrationTestsPassed: false,
+    simulationReport: null,
+    economicCritique: null,
+    repairAttempts: [],
     fixLog: [],
     autoFixExhausted: false,
+    uiArtifact: null,
     mode: "stub",
+    tokenUsage: null,
   };
 }

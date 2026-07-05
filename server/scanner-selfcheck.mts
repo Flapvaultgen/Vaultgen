@@ -431,6 +431,71 @@ const cases: Case[] = [
 }`,
     expectRules: ["claim-mapping-never-credited", "register-never-consumed", "half-implemented-reward-vault"],
   },
+  // ── Phase 4 novel-mechanic fixtures: empty prompt + no vaultPlan proves
+  // scanners fire from source structure alone (rule-derived, not kind-derived).
+  {
+    name: "novel-vote-allocation-lifecycle",
+    prompt: "",
+    code: `${BASE}
+    uint256 public charityBucket;
+    mapping(address => address) public charityVote;
+    event VoteCast(address indexed voter, address indexed charity);
+    receive() external payable { charityBucket += msg.value; }
+    function voteForCharity(address charity) external nonReentrant {
+        require(charity != address(0), unicode"Invalid charity / 无效地址");
+        charityVote[msg.sender] = charity;
+        emit VoteCast(msg.sender, charity);
+    }
+    function settleWeek(address winningCharity) external onlyManager nonReentrant {
+        uint256 amt = charityBucket;
+        charityBucket = 0;
+        _sendNative(winningCharity, address(this).balance);
+    }
+    function description() public view override returns (string memory) { return unicode"a / 啊"; }
+    function vaultUISchema() public pure override returns (VaultUISchema memory s) { s.vaultType = "T"; s.description = "d"; s.methods = new VaultMethodSchema[](0); }
+}`,
+    expectRules: [
+      "write-method-not-in-uischema",
+      "pays-full-balance",
+      "payout-no-recipient-check",
+      "participation-never-consumed",
+    ],
+  },
+  {
+    name: "classic-receive-swap-still-blocked",
+    prompt: "",
+    code: `${BASE}
+    uint256 public totalBurned;
+    receive() external payable {
+        if (msg.value == 0) return;
+        totalBurned += _buyAndBurn(msg.value, 0);
+    }
+    function description() public view override returns (string memory) { return unicode"a / 啊"; }
+    function vaultUISchema() public pure override returns (VaultUISchema memory s) { s.vaultType = "T"; s.description = "d"; s.methods = new VaultMethodSchema[](0); }
+}`,
+    expectRules: ["receive-no-external-call", "zero-slippage"],
+  },
+  {
+    name: "novel-user-token-custody-needs-guardian-disclosure",
+    prompt: "",
+    code: `${BASE}
+    uint256 public totalCommitted;
+    mapping(address => uint256) public committedOf;
+    event Committed(address indexed user, uint256 amount);
+    function commitTokens(uint256 amount) external nonReentrant {
+        require(amount > 0, unicode"Zero / 零");
+        uint256 beforeBal = IERC20(taxToken).balanceOf(address(this));
+        IERC20(taxToken).safeTransferFrom(msg.sender, address(this), amount);
+        uint256 received = IERC20(taxToken).balanceOf(address(this)) - beforeBal;
+        committedOf[msg.sender] += received;
+        totalCommitted += received;
+        emit Committed(msg.sender, received);
+    }
+    function description() public view override returns (string memory) { return unicode"a / 啊"; }
+    function vaultUISchema() public pure override returns (VaultUISchema memory s) { s.vaultType = "T"; s.description = "d"; s.methods = new VaultMethodSchema[](0); }
+}`,
+    expectRules: ["staking-guardian-trust-undisclosed"],
+  },
   {
     name: "good-rewardpool-pattern",
     prompt: "stake dividend",

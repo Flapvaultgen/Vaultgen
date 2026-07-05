@@ -2,6 +2,7 @@ import { readFile, readdir, access } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import { getAllFlapRules, getFlapRule, mapScannerFindingToRuleId } from "./constitution.js";
 
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(process.cwd(), "..");
@@ -26,17 +27,8 @@ export type SpecAuditResult = {
   mode: "openai" | "skipped";
 };
 
-const RULE_IDS = [
-  "001-vault-rules",
-  "002-vault-factory-rules",
-  "003-fairness-rule",
-  "004-ui-friendly-rules",
-  "005-receive-gas-limit",
-  "006-integration-test-coverage",
-  "007-ai-oracle-integration",
-  "008-trigger-service-integration",
-  "009-emergency-risk-controls",
-] as const;
+/** Long rule ids (e.g. "001-vault-rules") — canonical source is server/constitution.ts. */
+const RULE_IDS = getAllFlapRules().map((r) => r.slug);
 
 const itemSchema = z.object({
   id: z.string(),
@@ -185,13 +177,8 @@ function mergeSafetyFindings(
   const byId = new Map(items.map((i) => [i.id, { ...i }]));
 
   for (const f of safetyFindings) {
-    let ruleId = "001-vault-rules";
-    if (/receive|gas/.test(f.rule)) ruleId = "005-receive-gas-limit";
-    else if (/custom-error|ui/.test(f.rule)) ruleId = "004-ui-friendly-rules";
-    else if (/fairness|balance-based|sandwich/.test(f.rule)) ruleId = "003-fairness-rule";
-    else if (/trigger/.test(f.rule)) ruleId = "008-trigger-service-integration";
-    else if (/ai-callback|weak-random|wrong-ai/.test(f.rule)) ruleId = "007-ai-oracle-integration";
-    else if (/emergency|placeholder/.test(f.rule)) ruleId = "009-emergency-risk-controls";
+    // Canonical scanner-finding → Flap-rule attribution lives in constitution.ts.
+    const ruleId = getFlapRule(mapScannerFindingToRuleId(f.rule)).slug;
 
     const existing = byId.get(ruleId);
     const bump = f.level === "block" ? "fail" : "warn";
@@ -303,12 +290,13 @@ ${factorySource.slice(0, 20000)}
 
 Report PASS/WARN/FAIL/NA for each of the 9 rules.`;
 
-  const { default: OpenAI } = await import("openai");
-  const client = new OpenAI({ apiKey });
+  const { createAiClient } = await import("./ai-client.js");
+  const client = createAiClient(apiKey);
 
   const completion = await client.chat.completions.create({
     model,
     temperature: 0.1,
+    max_tokens: 4000,
     response_format: { type: "json_object" },
     messages: [
       { role: "system", content: systemPrompt },
@@ -328,7 +316,8 @@ Report PASS/WARN/FAIL/NA for each of the 9 rules.`;
 
   let parsed: z.infer<typeof responseSchema>;
   try {
-    parsed = responseSchema.parse(JSON.parse(raw));
+    const { extractJsonPayload } = await import("./ai-client.js");
+    parsed = responseSchema.parse(JSON.parse(extractJsonPayload(raw)));
   } catch {
     return {
       level: "warn",

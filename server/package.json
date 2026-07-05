@@ -6,13 +6,30 @@
     "dev": "tsx watch index.ts",
     "build": "tsc --noEmit",
     "start": "tsx index.ts",
-    "test:scanners": "tsx scanner-selfcheck.mts && tsx mechanic-completeness-selfcheck.mts"
+    "test:scanners": "tsx scanner-selfcheck.mts && tsx mechanic-completeness-selfcheck.mts && tsx scanner-antiregression-selfcheck.mts && tsx constitution-selfcheck.mts && tsx mechanic-spec-selfcheck.mts && tsx codegen-prompt-selfcheck.mts && tsx test-gen-selfcheck.mts && tsx scope-selfcheck.mts && tsx economic-hardening-selfcheck.mts && tsx critic-repair-selfcheck.mts && tsx openai-model-selfcheck.mts && tsx chat-store-selfcheck.mts && tsx deployed-size-selfcheck.mts && tsx ai-cost-selfcheck.mts && tsx ui-gen-selfcheck.mts",
+    "test:ai-cost": "tsx ai-cost-selfcheck.mts",
+    "test:ui-gen": "tsx ui-gen-selfcheck.mts",
+    "test:deployed-size": "tsx deployed-size-selfcheck.mts",
+    "test:test-gen": "tsx test-gen-selfcheck.mts",
+    "test:scope": "tsx scope-selfcheck.mts",
+    "test:constitution": "tsx constitution-selfcheck.mts",
+    "test:mechanic-spec": "tsx mechanic-spec-selfcheck.mts",
+    "test:codegen-prompt": "tsx codegen-prompt-selfcheck.mts",
+    "test:scanner-antiregression": "tsx scanner-antiregression-selfcheck.mts",
+    "test:economic-hardening": "tsx economic-hardening-selfcheck.mts",
+    "test:critic-repair": "tsx critic-repair-selfcheck.mts",
+    "test:openai-model": "tsx openai-model-selfcheck.mts",
+    "test:chat-store": "tsx chat-store-selfcheck.mts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.110.0",
+    "@supabase/supabase-js": "^2.110.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
+    "esbuild": "^0.28.1",
     "express": "^4.21.2",
     "openai": "^4.77.0",
+    "viem": "^2.55.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
