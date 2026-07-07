@@ -4,28 +4,35 @@
 
 @layer base {
   :root {
-    --background: 258 22% 6%;
+    /* Lime/chartreuse palette (was purple) — hue 100 for dark neutrals,
+       hue 72 (≈ #CAFF00) for the primary/accent pop. */
+    --background: 100 22% 6%;
     --foreground: 0 0% 96%;
-    --card: 258 18% 9%;
+    --card: 100 18% 9%;
     --card-foreground: 0 0% 96%;
-    --primary: 265 85% 62%;
-    --primary-foreground: 0 0% 100%;
-    --secondary: 258 14% 13%;
+    --primary: 72 100% 50%;
+    --primary-foreground: 100 25% 8%;
+    --secondary: 100 14% 13%;
     --secondary-foreground: 0 0% 92%;
-    --muted: 258 12% 14%;
-    --muted-foreground: 258 6% 55%;
-    --accent: 265 85% 62%;
-    --accent-foreground: 0 0% 100%;
+    --muted: 100 12% 14%;
+    --muted-foreground: 100 6% 55%;
+    --accent: 72 100% 50%;
+    --accent-foreground: 100 25% 8%;
     --destructive: 0 65% 55%;
     --destructive-foreground: 0 0% 98%;
     --success: 152 50% 44%;
     --success-foreground: 0 0% 100%;
     --warning: 38 90% 52%;
-    --warning-foreground: 258 22% 6%;
-    --border: 258 12% 18%;
-    --input: 258 12% 16%;
-    --ring: 265 85% 62%;
+    --warning-foreground: 100 22% 6%;
+    --border: 100 12% 18%;
+    --input: 100 12% 16%;
+    --ring: 72 100% 50%;
     --radius: 0.625rem;
+  }
+
+  html {
+    @apply overflow-x-hidden antialiased;
+    color-scheme: dark;
   }
 
   * {
@@ -33,11 +40,86 @@
   }
 
   body {
-    @apply min-h-screen bg-background text-foreground antialiased;
+    @apply min-h-screen bg-background text-foreground;
     background-color: hsl(var(--background));
     background-image:
-      radial-gradient(ellipse 120% 80% at 50% -30%, hsl(265 50% 24% / 0.4), transparent 50%),
-      radial-gradient(ellipse 60% 40% at 100% 100%, hsl(265 35% 18% / 0.2), transparent 45%);
+      radial-gradient(ellipse 120% 80% at 50% -30%, hsl(100 40% 20% / 0.4), transparent 50%),
+      radial-gradient(ellipse 60% 40% at 100% 100%, hsl(90 35% 16% / 0.2), transparent 45%);
     background-attachment: fixed;
+    position: relative;
+    width: 100%;
+    max-width: 100%;
+  }
+
+  ::selection {
+    background: hsl(72 100% 50% / 0.35);
+    color: hsl(var(--foreground));
+  }
+
+  button:enabled {
+    cursor: pointer;
+  }
+  button:disabled {
+    cursor: not-allowed;
+  }
+}
+
+@layer components {
+  /* Flat, static backdrop — no animation, no heavy glow. */
+  .fgv-plasma {
+    background:
+      radial-gradient(ellipse 70% 55% at 30% 20%, hsl(90 55% 22% / 0.35), transparent 60%),
+      radial-gradient(ellipse 70% 60% at 75% 75%, hsl(70 60% 18% / 0.3), transparent 60%);
+  }
+
+  .fgv-kinetic-line {
+    animation: fgv-rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .fgv-kinetic-line:nth-child(2) {
+    animation-delay: 0.06s;
+  }
+  .fgv-kinetic-line:nth-child(4) {
+    animation-delay: 0.12s;
+  }
+  .fgv-kinetic-line:nth-child(5) {
+    animation-delay: 0.18s;
+  }
+
+  .fgv-hero-textarea {
+    @apply min-h-[120px] resize-none rounded-xl border border-border/80 bg-card/80 text-sm transition-colors;
+  }
+  .fgv-hero-textarea:focus {
+    @apply border-primary/50 outline-none ring-1 ring-primary/30;
+  }
+
+  .fgv-accent-gradient {
+    /* flat accent color, no animated gradient/glow */
+    color: hsl(var(--primary));
+  }
+
+  .fgv-section-eyebrow {
+    @apply text-[10px] font-bold uppercase tracking-[0.22em] text-primary;
+  }
+
+  .fgv-doc-card {
+    @apply rounded-2xl border border-border/60 bg-card/50 p-5;
+  }
+
+  .fgv-diagram-frame {
+    @apply my-4 rounded-2xl border border-border/60 bg-card/30 p-5 sm:p-7;
+  }
+}
+
+@layer utilities {
+  @keyframes fgv-rise {
+    from {
+      opacity: 0;
+      transform: translateY(0.6rem);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
   }
 }

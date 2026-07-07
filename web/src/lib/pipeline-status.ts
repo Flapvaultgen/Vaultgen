@@ -15,6 +15,7 @@ export type PipelinePhase =
   | "compile_failed"
   | "auditing"
   | "generating_tests"
+  | "ui_gen"
   | "done"
   | "error";
 
@@ -34,6 +35,7 @@ export const FIX_PHASE_LABEL: Record<FixLogEntry["phase"], string> = {
   spec_fix: "Spec fix",
   generating_tests: "Test generation",
   auditing: "Pre-audit",
+  critic_repair: "Economic repair",
 };
 
 export function describeFixEntry(entry: FixLogEntry): string {
@@ -101,6 +103,8 @@ export function describePipelineHeadline(
       return "Generating integration test…";
     case "auditing":
       return "Running Flap pre-audit (advisory)…";
+    case "ui_gen":
+      return "Designing the custom vault UI…";
     default:
       return "Working…";
   }

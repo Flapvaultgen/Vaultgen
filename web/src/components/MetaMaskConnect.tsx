@@ -4,14 +4,16 @@ import { useAccount, useConnect, useDisconnect, useChainId, useSwitchChain } fro
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
 import { cn } from "../lib/utils";
-import { SUPPORTED_CHAINS, hasMetaMaskProvider } from "../lib/wagmi";
+import { SUPPORTED_CHAINS, hasMetaMaskProvider, pickMetaMaskConnector } from "../lib/wagmi";
+import { useI18n } from "../lib/i18n/context";
 
 function truncateAddress(address: string) {
   return `${address.slice(0, 6)}…${address.slice(-4)}`;
 }
 
 export default function MetaMaskConnect() {
-  const { address, isConnected, isConnecting } = useAccount();
+  const { dict } = useI18n();
+  const { address, isConnected } = useAccount();
   const { connect, connectors, isPending, error: connectError } = useConnect();
   const { disconnect } = useDisconnect();
   const chainId = useChainId();
@@ -19,17 +21,22 @@ export default function MetaMaskConnect() {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
-  const metaMaskConnector = connectors.find((c) => c.id === "metaMask" || c.name === "MetaMask");
+  const formatConnectError = (message: string): string => {
+    if (/provider not found/i.test(message)) return dict.wallet.providerNotFoundError;
+    return message.split("\n")[0] ?? message;
+  };
+
+  const metaMaskConnector = pickMetaMaskConnector(connectors);
   const activeChain = SUPPORTED_CHAINS.find((c) => c.id === chainId);
-  const busy = isConnecting || isPending || isSwitching;
-  const metaMaskInstalled = hasMetaMaskProvider();
+  const busy = isPending || isSwitching;
+  const metaMaskInstalled = hasMetaMaskProvider() || Boolean(metaMaskConnector);
 
   const onConnect = () => {
-    if (!metaMaskInstalled) {
+    if (!metaMaskConnector) {
       window.open("https://metamask.io/download/", "_blank", "noopener,noreferrer");
       return;
     }
-    if (metaMaskConnector) connect({ connector: metaMaskConnector });
+    connect({ connector: metaMaskConnector });
   };
 
   useEffect(() => {
@@ -43,17 +50,12 @@ export default function MetaMaskConnect() {
   if (!isConnected) {
     return (
       <div className="flex flex-col items-end gap-1">
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={busy}
-          onClick={onConnect}
-        >
-          {busy ? "Connecting…" : metaMaskInstalled ? "Connect MetaMask" : "Install MetaMask"}
+        <Button variant="outline" size="sm" disabled={busy || !metaMaskConnector} onClick={onConnect}>
+          {busy ? dict.wallet.connecting : metaMaskInstalled ? dict.wallet.connectMetaMask : dict.wallet.installMetaMask}
         </Button>
         {connectError && (
           <p className="max-w-xs text-right text-xs text-destructive">
-            {connectError.message.split("\n")[0]}
+            {formatConnectError(connectError.message)}
           </p>
         )}
       </div>
@@ -76,7 +78,7 @@ export default function MetaMaskConnect() {
             <p className="truncate font-mono text-xs text-muted-foreground">{address}</p>
           </div>
           <div className="border-b border-border px-3 py-2">
-            <p className="mb-1.5 text-xs text-muted-foreground">Network</p>
+            <p className="mb-1.5 text-xs text-muted-foreground">{dict.wallet.network}</p>
             <div className="flex flex-col gap-1">
               {SUPPORTED_CHAINS.map((chain) => (
                 <button
@@ -103,7 +105,7 @@ export default function MetaMaskConnect() {
             }}
           >
             <LogOut className="size-3.5" />
-            Disconnect
+            {dict.wallet.disconnect}
           </button>
         </div>
       )}
