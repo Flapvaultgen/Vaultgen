@@ -1,8 +1,6 @@
 # Flap Vault Gen
 
-**Flap Vault Gen is v0 for tax vaults.**
-
-Right now, launching a custom vault on Flap requires coding skills, knowledge of the 9 spec rules, and avoiding common EVM pitfalls. Flap Vault Gen removes that barrier.
+Launching a custom vault on Flap normally requires coding skills, knowledge of the 9 spec rules, and avoiding common EVM pitfalls. Flap Vault Gen removes that barrier.
 
 Describe the mechanic in plain English. The platform generates Solidity using Flap's base contracts, compiles it with Foundry, runs static and behavioral checks, provides an advisory 9-rule Flap pre-audit — then lets you launch directly to Flap from the web UI.
 
@@ -18,7 +16,7 @@ Each generation runs a closed loop until it passes or exhausts its retry budget:
 |------|-----------|---------|
 | **0. Classify** | `classifyVaultPlan()` | JSON vault kind + buckets + invariants before codegen |
 | **0b. Mechanic design** | `expandMechanicDesign()` | Lifecycle contract for novel prompts (milestone, register+claim, …) |
-| **1. Draft** | AI (model set by `OPENAI_MODEL`) | Writes a complete vault inheriting `CodegenVaultBase` / Flap V2 |
+| **1. Draft** | Anthropic Claude (model set by `OPENAI_MODEL`) | Writes a complete vault inheriting `CodegenVaultBase` / Flap V2 |
 | **2. Compile** | Foundry (`forge build`, solc 0.8.26) | Real compile against Flap interfaces; compile errors feed back to AI |
 | **3. Dual safety scan** | `scanSafetyCombined()` | Logic + mechanic completeness scanners |
 | **4. Fix loop** | AI + structured failure memory | Retries compile / safety / fork test failures (up to 12 passes) |
@@ -30,7 +28,7 @@ Each generation runs a closed loop until it passes or exhausts its retry budget:
 
 **Deploy path:** compiled creation bytecode → `CodegenVaultFactory` (CREATE2) → Flap token launch on BSC testnet or mainnet.
 
-**Stack:** React studio · Node API · Foundry · OpenAI/Anthropic · bundled `flap-spec-checker` rules · Flap V2 base contracts in `src/flap/`.
+**Stack:** React studio · Node API · Foundry · Anthropic Claude (OpenAI as fallback) · bundled `flap-spec-checker` rules · Flap V2 base contracts in `src/flap/`.
 
 ---
 
@@ -99,14 +97,15 @@ Connect MetaMask when prompted — you'll sign one message to prove wallet owner
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `OPENAI_API_KEY` | Yes | AI codegen (OpenAI or Anthropic key) |
-| `OPENAI_MODEL` | Yes | e.g. `gpt-5.4` or `claude-sonnet-5` |
+| `OPENAI_API_KEY` | Yes | Your Anthropic key (`sk-ant-…`); the OpenAI-compatible endpoint is used internally |
+| `OPENAI_BASE_URL` | Yes | Set to `https://api.anthropic.com/v1/` to route to Anthropic. Unset = OpenAI (fallback only) |
+| `OPENAI_MODEL` | Yes | Primary model — e.g. `claude-sonnet-5` for codegen, planning, and repair |
+| `OPENAI_CHEAP_MODEL` | Recommended | Cheaper model for advisory calls (scope, economic critic) — e.g. `claude-haiku-4-5` |
+| `OPENAI_ESCALATION_MODEL` | Optional | Stronger model for one final repair escalation attempt |
 | `AUTH_SECRET` | **Yes in prod** | Signs wallet session tokens — use `openssl rand -hex 32`; unset = random per-process (sessions reset on restart) |
 | `CORS_ORIGIN` | Yes | Your Vercel URL, e.g. `https://flapvaultgen.vercel.app` |
 | `SUPABASE_URL` | Recommended | Chat/token history persistence; in-memory fallback if unset |
 | `SUPABASE_SERVICE_ROLE_KEY` | Recommended | Server-side only — never exposed to the frontend |
-| `OPENAI_CHEAP_MODEL` | Optional | Cheaper model for advisory calls (scope, economic critic) |
-| `OPENAI_ESCALATION_MODEL` | Optional | Stronger model for one final repair escalation |
 
 Apply `supabase/schema.sql` to your Supabase project before setting the Supabase env vars.
 
