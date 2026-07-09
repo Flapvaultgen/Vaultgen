@@ -139,15 +139,28 @@ Scanners include: Flap fund-flow rules, staking accrual, lottery/survivor AI ora
 | Auto compile / fix loop | ✅ |
 | Chat refine after first gen | ✅ |
 | Pipeline progress + fix log | ✅ |
-| Spec audit panel (advisory) | ✅ |
-| Launch on Flap (3-step: factory → register → launch) | ✅ |
-| **Scope / capability banner** | ✅ (recent) |
+| Spec audit + economic critic panels (advisory) | ✅ |
+| Scope / capability banner | ✅ |
+| Wallet sign-in (SIWE-lite: nonce + MetaMask signature + HMAC session) | ✅ |
+| Chat + run history persisted per wallet (Supabase / in-memory fallback) | ✅ |
+| Launch on Flap — factory → register → `newTokenV6WithVault` | ✅ |
+| Token metadata upload to Flap IPFS (image, description, socials) | ✅ |
+| Dev buy at launch (`quoteAmt`) | ✅ |
+| EIP-170 bytecode size guard + `--via-ir` rescue path | ✅ |
+| Launched token record persisted (`launched_tokens` table) | ✅ |
+| Public tokens gallery (`/tokens`) with live on-chain vault stats | ✅ |
+| Token detail page with dynamic vault UI (`vaultUISchema()`) | ✅ |
+| AI-generated React vault UI (sandboxed iframe, zip download) | ✅ |
+| English + Simplified Chinese i18n (UI + AI-generated vault code) | ✅ |
+| Robinhood Chain support | 🔜 Flap is live there — planned |
 
 **Launch flow** (`web/src/components/LaunchOnFlapPanel.tsx`):
 
 1. Deploy `CodegenVaultFactory` (if needed)
 2. `registerVault(creationBytecode, description)` — so Flap shows real vault description, not "Fund Recipient Information"
-3. Launch token on Flap with vanity salt (`7777`)
+3. Upload token metadata (image, description, socials) to Flap IPFS → IPFS CID
+4. Call `newTokenV6WithVault` on Flap VaultPortal — vanity salt (`7777`), attaches vault in one tx
+5. Persist `launched_tokens` record; show live launch URL
 
 ### 3.5 On-chain factory
 
@@ -333,11 +346,12 @@ Expected: `out_of_scope` banner → still generates closest tax vault (e.g. buyb
 
 | Priority | Item | Why |
 |----------|------|-----|
-| 1 | **Draft vs Launch UX** | Reframe "Not deployable" as "Draft — iterate in chat" so unique ideas don't feel dead-end |
+| 1 | **Robinhood Chain support** | Flap is live on chain 4663; add chain config + RPC transports |
 | 2 | **Archetype #2: bonding-curve vault** | New base contract + scanners + custom UI track for SATO-class products |
-| 3 | **Fork simulation preview** | Show "we ran N user journeys" before launch |
-| 4 | **Plan approval step** | Show mechanic spec before codegen (like Cursor plan mode) |
-| 5 | **Hide oracle plumbing in schema** | Don't expose `aiModelId` / `pendingRequestId` to end users on Flap |
+| 3 | **Wallet signature verification on Flap** | Current sessions prove browser ownership; Flap may want an additional on-chain verification step for mainnet launches |
+| 4 | **Fork simulation preview** | Show "we ran N user journeys" before launch |
+| 5 | **Plan approval step** | Show mechanic spec before codegen (like Cursor plan mode) |
+| 6 | **Hide oracle plumbing in schema** | Don't expose `aiModelId` / `pendingRequestId` to end users on Flap |
 
 ---
 
@@ -346,17 +360,31 @@ Expected: `out_of_scope` banner → still generates closest tax vault (e.g. buyb
 | File | Purpose |
 |------|---------|
 | `server/codegen.ts` | Main pipeline, system prompt, PREAMBLE, scanners |
-| `server/vault-plan.ts` | Vault kinds, mechanic design, **VaultScope** |
+| `server/vault-plan.ts` | Vault kinds, mechanic design, VaultScope |
 | `server/mechanic-completeness.ts` | Structural UI/mechanic scanners |
 | `server/test-gen.ts` | AI-generated fork integration tests |
 | `server/spec-audit.ts` | Advisory 9-rule Flap audit |
+| `server/economic-critic.ts` | Advisory payout fairness review |
+| `server/auth.ts` | Wallet signature auth — nonce, verify, HMAC session tokens |
+| `server/chat-store.ts` | Supabase-backed chat/run/artifact persistence (in-memory fallback) |
+| `server/chat-routes.ts` | Chat, run, artifact, launched-token API routes |
+| `server/ui-gen.ts` | AI-generated React vault UI component package |
 | `web/src/CodegenStudio.tsx` | Studio UI, chat, scope banner |
+| `web/src/ChatPage.tsx` | Full chat history + code + launch panel |
+| `web/src/TokensPage.tsx` | Public tokens gallery |
+| `web/src/TokenDetailPage.tsx` | Token + vault detail with live on-chain stats |
 | `web/src/lib/deploy-gate.ts` | Deploy / launch readiness |
-| `web/src/components/LaunchOnFlapPanel.tsx` | Factory deploy, register, Flap launch |
+| `web/src/lib/flap-launch.ts` | `newTokenV6WithVault` call, preflight simulation, revert decoding |
+| `web/src/lib/flap-register.ts` | `registerVault` call |
+| `web/src/components/LaunchOnFlapPanel.tsx` | Factory deploy, register, Flap launch UI |
+| `web/src/lib/current-user.ts` | Wallet identity + session token cache |
+| `web/src/lib/chat-api.ts` | Frontend API client (auth headers on every call) |
+| `web/src/lib/i18n/` | English + Chinese translations |
+| `supabase/schema.sql` | Full DB schema — users, chats, runs, artifacts, launched_tokens |
 | `src/CodegenVaultFactory.sol` | On-chain bytecode registration |
 | `src/flap/VaultBaseV2.sol` | Flap vault base |
 | `src/flap/IVaultSchemasV1.sol` | UI schema structs |
-| `docs/CODEGEN_STUDIO.md` | End-user guide (prompts, lottery, deploy) |
+| `docs/CODEGEN_STUDIO.md` | End-user guide (prompts, launch, tokens page) |
 
 ---
 
@@ -375,7 +403,8 @@ cd ../web && npm run dev:all
 ```
 
 ```bash
-cd server && npm run test:scanners   # safety + mechanic completeness self-checks
+cd server && npm run test:scanners   # safety + mechanic + wallet auth self-checks
+cd web && npm test                     # validation, vault UI bridge, i18n self-checks
 forge test                             # Solidity tests (requires Foundry)
 ```
 
@@ -391,4 +420,4 @@ forge test                             # Solidity tests (requires Foundry)
 
 ---
 
-*Last updated: reflects scope classifier, launch-on-Flap flow, and studio architecture as of the current codebase.*
+*Last updated: reflects wallet auth, chat/token persistence, launch flow, custom vault UI, i18n, and tokens gallery as of the current codebase.*
