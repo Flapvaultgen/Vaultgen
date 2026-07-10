@@ -10,10 +10,9 @@
 
 import type { VaultPlan } from "./vault-plan.js";
 import type { MechanicSpec } from "./mechanic-spec.js";
+import { extractFunctionChunks, extractVaultUISchemaBody, type FnChunk } from "./solidity-parse.js";
 
 export type MechanicFinding = { rule: string; detail: string; level?: "block" | "warn" };
-
-type FnChunk = { name: string; body: string; header: string };
 
 const SKIP_UI_METHODS = new Set([
   "description",
@@ -35,39 +34,6 @@ function isMechanismTrigger(fnName: string): boolean {
     /^(request|execute|advance|trigger|run|perform|start)/i.test(fnName) ||
     /Draw|Burn|Milestone|Buyback|Epoch|Round|Settle|Distribute|Payout/i.test(fnName)
   );
-}
-
-function extractFunctionChunks(source: string): FnChunk[] {
-  const chunks: FnChunk[] = [];
-  const re = /function\s+(\w+)\s*\([^)]*\)[^{]*\{/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(source))) {
-    const name = m[1]!;
-    const start = m.index + m[0].length;
-    let i = start;
-    let depth = 1;
-    for (; i < source.length && depth > 0; i++) {
-      const c = source[i];
-      if (c === "{") depth++;
-      else if (c === "}") depth--;
-    }
-    chunks.push({ name, header: m[0], body: source.slice(start, i - 1) });
-  }
-  return chunks;
-}
-
-function extractVaultUISchemaBody(source: string): string | null {
-  const m = source.match(/function\s+vaultUISchema\s*\([^)]*\)[^{]*\{/);
-  if (!m || m.index === undefined) return null;
-  let i = m.index + m[0].length;
-  let depth = 1;
-  const start = i;
-  for (; i < source.length && depth > 0; i++) {
-    const c = source[i];
-    if (c === "{") depth++;
-    else if (c === "}") depth--;
-  }
-  return source.slice(start, i - 1);
 }
 
 function schemaListsMethod(schemaBody: string, fnName: string): boolean {
@@ -1061,15 +1027,6 @@ export function scanLifecycleSafety(source: string, spec?: MechanicSpec): Mechan
   }
 
   return findings;
-}
-
-export function isNovelMechanicPrompt(prompt: string): boolean {
-  return (
-    /milestone|register\s*interest|registration|threshold|advance|epoch|tier|badge|referral|vote|gauge|campaign|quest|reward\s*pool/i.test(
-      prompt
-    ) ||
-    (/\bregister\b/i.test(prompt) && /\bclaim\b/i.test(prompt))
-  );
 }
 
 /**

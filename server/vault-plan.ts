@@ -214,8 +214,6 @@ If mode is user_rewards: every claim mapping MUST be credited in advance/distrib
 `;
 }
 
-export { isNovelMechanicPrompt } from "./mechanic-completeness.js";
-
 /**
  * @deprecated Phase 6: the main pipeline never calls this. It plans with
  * `planMechanicSpec` (mechanic-spec.ts) and judges launch-readiness with
