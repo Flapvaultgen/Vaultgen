@@ -16,7 +16,7 @@ Each generation runs a closed loop until it passes or exhausts its retry budget:
 |------|-----------|---------|
 | **0. Classify** | `classifyVaultPlan()` | JSON vault kind + buckets + invariants before codegen |
 | **0b. Mechanic design** | `expandMechanicDesign()` | Lifecycle contract for novel prompts (milestone, register+claim, …) |
-| **1. Draft** | Anthropic Claude (model set by `OPENAI_MODEL`) | Writes a complete vault inheriting `CodegenVaultBase` / Flap V2 |
+| **1. Draft** | Anthropic Claude | Writes a complete vault inheriting `CodegenVaultBase` / Flap V2 |
 | **2. Compile** | Foundry (`forge build`, solc 0.8.26) | Real compile against Flap interfaces; compile errors feed back to AI |
 | **3. Dual safety scan** | `scanSafetyCombined()` | Logic + mechanic completeness scanners |
 | **4. Fix loop** | AI + structured failure memory | Retries compile / safety / fork test failures (up to 12 passes) |
@@ -28,7 +28,7 @@ Each generation runs a closed loop until it passes or exhausts its retry budget:
 
 **Deploy path:** compiled creation bytecode → `CodegenVaultFactory` (CREATE2) → Flap token launch on BSC testnet or mainnet.
 
-**Stack:** React studio · Node API · Foundry · Anthropic Claude (OpenAI as fallback) · bundled `flap-spec-checker` rules · Flap V2 base contracts in `src/flap/`.
+**Stack:** React studio · Node API · Foundry · Anthropic Claude · bundled `flap-spec-checker` rules · Flap V2 base contracts in `src/flap/`.
 
 ---
 
@@ -97,11 +97,10 @@ Connect MetaMask when prompted — you'll sign one message to prove wallet owner
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `OPENAI_API_KEY` | Yes | Your Anthropic key (`sk-ant-…`); the OpenAI-compatible endpoint is used internally |
-| `OPENAI_BASE_URL` | Yes | Set to `https://api.anthropic.com/v1/` to route to Anthropic. Unset = OpenAI (fallback only) |
+| `OPENAI_API_KEY` | Yes | Your Anthropic key (`sk-ant-…`) |
 | `OPENAI_MODEL` | Yes | Primary model — e.g. `claude-sonnet-5` for codegen, planning, and repair |
 | `OPENAI_CHEAP_MODEL` | Recommended | Cheaper model for advisory calls (scope, economic critic) — e.g. `claude-haiku-4-5` |
-| `OPENAI_ESCALATION_MODEL` | Optional | Stronger model for one final repair escalation attempt |
+| `OPENAI_ESCALATION_MODEL` | Optional | Stronger model for one final repair escalation attempt — e.g. `claude-opus-4` |
 | `AUTH_SECRET` | **Yes in prod** | Signs wallet session tokens — use `openssl rand -hex 32`; unset = random per-process (sessions reset on restart) |
 | `CORS_ORIGIN` | Yes | Your Vercel URL, e.g. `https://flapvaultgen.vercel.app` |
 | `SUPABASE_URL` | Recommended | Chat/token history persistence; in-memory fallback if unset |
