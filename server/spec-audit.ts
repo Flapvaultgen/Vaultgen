@@ -236,7 +236,7 @@ export async function runSpecAudit(
   if (!apiKey) {
     return {
       level: "skipped",
-      summary: "Set OPENAI_API_KEY in server/.env.local to run Flap pre-audit verification.",
+      summary: "Set ANTHROPIC_API_KEY in server/.env.local to run Flap pre-audit verification.",
       items: [],
       mode: "skipped",
     };

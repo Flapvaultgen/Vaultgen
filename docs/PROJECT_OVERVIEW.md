@@ -51,7 +51,7 @@ server/            Node.js AI pipeline + HTTP API (tsx / ESM)
   chat-routes.ts          — HTTP API routes (chat, run, artifact, launched-token)
   auth.ts                 — wallet signature auth (nonce + sign + HMAC session token)
   ai-client.ts            — Anthropic SDK client with prompt caching + token tracking
-  openai-model.ts         — env-driven model resolution
+  ai-model.ts             — env-driven model resolution
 
 src/               Solidity contracts
   CodegenVaultFactory.sol — on-chain bytecode registry (CREATE2 launch)
@@ -170,10 +170,10 @@ After launch, the token record is saved and appears on `/tokens`.
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `OPENAI_API_KEY` | Yes | Anthropic API key (`sk-ant-…`) |
-| `OPENAI_MODEL` | Yes | Primary model — e.g. `claude-sonnet-5` |
-| `OPENAI_CHEAP_MODEL` | Recommended | Cheap model for advisory calls — e.g. `claude-haiku-4-5` |
-| `OPENAI_ESCALATION_MODEL` | Optional | Stronger model for final repair escalation |
+| `ANTHROPIC_API_KEY` | Yes | Anthropic API key (`sk-ant-…`) |
+| `AI_MODEL` | Yes | Primary model — e.g. `claude-sonnet-5` |
+| `AI_CHEAP_MODEL` | Recommended | Cheap model for advisory calls — e.g. `claude-haiku-4-5` |
+| `AI_ESCALATION_MODEL` | Optional | Stronger model for final repair escalation |
 | `AUTH_SECRET` | Yes (prod) | Signs session tokens — `openssl rand -hex 32` |
 | `CORS_ORIGIN` | Yes (prod) | Vercel frontend URL |
 | `SUPABASE_URL` | Recommended | Chat + token persistence |
@@ -190,7 +190,7 @@ cd ../server && npm install
 
 # Configure
 cp server/.env.example server/.env.local
-# edit: set OPENAI_API_KEY (Anthropic key)
+# edit: set ANTHROPIC_API_KEY (Anthropic key)
 
 # Run everything
 cd ../web && npm run dev:all

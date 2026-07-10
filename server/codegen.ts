@@ -48,7 +48,7 @@ import {
   summarizeRemainingIssues,
   type RepairAttempt,
 } from "./critic-repair.js";
-import { resolveCheapModel, resolveEscalationModel } from "./openai-model.js";
+import { resolveCheapModel, resolveEscalationModel } from "./ai-model.js";
 import { generateVaultUi, type VaultUiArtifact } from "./ui-gen.js";
 import {
   extractJsonPayload,
@@ -3847,7 +3847,7 @@ export async function generateVaultCodeStream(
 ): Promise<void> {
   if (!apiKey) {
     const stub = stubResult(prompt);
-    emit({ type: "status", phase: "error", attempt: 0, message: "OPENAI_API_KEY not set" });
+    emit({ type: "status", phase: "error", attempt: 0, message: "ANTHROPIC_API_KEY not set" });
     emit({ type: "result", result: stub });
     return;
   }
@@ -3896,8 +3896,8 @@ export async function generateVaultCodeRefineStream(
   emit: (ev: CodegenEvent) => void
 ): Promise<void> {
   if (!apiKey) {
-    emit({ type: "status", phase: "error", attempt: 0, message: "OPENAI_API_KEY not set" });
-    emit({ type: "error", error: "OPENAI_API_KEY not set" });
+    emit({ type: "status", phase: "error", attempt: 0, message: "ANTHROPIC_API_KEY not set" });
+    emit({ type: "error", error: "ANTHROPIC_API_KEY not set" });
     return;
   }
 
@@ -4196,7 +4196,7 @@ function stubResult(prompt: string): CodegenResult {
     }
 
     function description() public view override returns (string memory) {
-        return "Stub vault (set OPENAI_API_KEY to generate real custom logic)";
+        return "Stub vault (set ANTHROPIC_API_KEY to generate real custom logic)";
     }
 
     function vaultUISchema() public pure override returns (VaultUISchema memory schema) {
@@ -4215,14 +4215,14 @@ function stubResult(prompt: string): CodegenResult {
   const safety = scanSafety(body, contractName, prompt);
   return {
     contractName,
-    explanation: `Stub for "${prompt.slice(0, 80)}" — set OPENAI_API_KEY for real AI codegen.`,
+    explanation: `Stub for "${prompt.slice(0, 80)}" — set ANTHROPIC_API_KEY for real AI codegen.`,
     source: `${PREAMBLE}\n${body}\n`,
     compiled: false,
-    compileErrors: "OPENAI_API_KEY not set — returning a stub (not compiled). Set the key in server/.env.local for real codegen.",
+    compileErrors: "ANTHROPIC_API_KEY not set — returning a stub (not compiled). Set the key in server/.env.local for real codegen.",
     safety,
     specAudit: {
       level: "skipped",
-      summary: "Pre-audit requires OPENAI_API_KEY and a successful compile.",
+      summary: "Pre-audit requires ANTHROPIC_API_KEY and a successful compile.",
       items: [],
       mode: "skipped",
     },

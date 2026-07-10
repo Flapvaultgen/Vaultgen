@@ -7,7 +7,7 @@
  */
 import { Router, type Request, type Response } from "express";
 import { generateVaultCodeStream, type ApproximationConsent, type CodegenEvent } from "./codegen.js";
-import { resolveOpenAiModel } from "./openai-model.js";
+import { resolveAiModel } from "./ai-model.js";
 import { getChatStore } from "./chat-store.js";
 import { isSupabaseConfigured } from "./supabase.js";
 import { RunManager, type RunStreamEvent } from "./run-manager.js";
@@ -57,12 +57,12 @@ function sendForbidden(res: Response): void {
   sendError(res, 403, "This chat belongs to a different wallet.");
 }
 
-/** Model routing stays in openai-model.ts — never hardcoded here. */
+/** Model routing stays in ai-model.ts — never hardcoded here. */
 const defaultGenerator = (
   prompt: string,
   emit: (ev: CodegenEvent) => void,
   approximationConsent?: ApproximationConsent
-) => generateVaultCodeStream(prompt, process.env.OPENAI_API_KEY, resolveOpenAiModel(), emit, approximationConsent);
+) => generateVaultCodeStream(prompt, process.env.ANTHROPIC_API_KEY, resolveAiModel(), emit, approximationConsent);
 
 export const runManager = new RunManager(getChatStore, defaultGenerator);
 
@@ -186,7 +186,7 @@ export function createChatRouter(): Router {
         chatId,
         userMessageId: userMessage.id,
         assistantMessageId: assistantMessage.id,
-        model: process.env.OPENAI_API_KEY ? resolveOpenAiModel() : null,
+        model: process.env.ANTHROPIC_API_KEY ? resolveAiModel() : null,
       });
 
       // Pipeline starts lazily on first stream subscription — this response

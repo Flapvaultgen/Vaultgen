@@ -16,15 +16,15 @@
  * failure, integration/simulation failure, unsafe scope verdict, missing
  * bytecode. A repair attempt that regresses any hard gate is ROLLED BACK.
  *
- * Model routing stays environment-driven (openai-model.ts): normal repair
+ * Model routing stays environment-driven (ai-model.ts): normal repair
  * attempts use the pipeline's configured default model; one optional final
- * escalation attempt uses OPENAI_ESCALATION_MODEL only when that env is set.
+ * escalation attempt uses AI_ESCALATION_MODEL only when that env is set.
  * No model name literal lives in this module.
  */
 import type { CriticFinding, EconomicCriticReport } from "./economic-critic.js";
 import type { MechanicSpec } from "./mechanic-spec.js";
 
-/** Max normal repair attempts; one extra escalation attempt only when OPENAI_ESCALATION_MODEL is set. */
+/** Max normal repair attempts; one extra escalation attempt only when AI_ESCALATION_MODEL is set. */
 export const MAX_CRITIC_REPAIR_ATTEMPTS = 2;
 
 export type RepairAttempt = {

@@ -7,10 +7,10 @@
  * loops re-read the large stable prefix at ~0.1x input price.
  *
  * Env vars:
- *   OPENAI_API_KEY   — your Anthropic API key (sk-ant-…)
- *   OPENAI_MODEL     — primary model, e.g. claude-sonnet-5
- *   OPENAI_CHEAP_MODEL      — optional cheap model for advisory calls
- *   OPENAI_ESCALATION_MODEL — optional stronger model for final repair escalation
+ *   ANTHROPIC_API_KEY   — your Anthropic API key (sk-ant-…)
+ *   AI_MODEL            — primary model, e.g. claude-sonnet-5
+ *   AI_CHEAP_MODEL      — optional cheap model for advisory calls
+ *   AI_ESCALATION_MODEL — optional stronger model for final repair escalation
  *
  * Every call records token usage into an AsyncLocalStorage-scoped accumulator
  * (see runWithAiUsage), so the pipeline can report per-run totals and an

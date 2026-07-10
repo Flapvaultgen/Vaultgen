@@ -8,7 +8,7 @@ dotenv.config();
 import { writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { generateVaultCode, scanSafety, scanVaultLogic } from "./codegen.ts";
-import { resolveOpenAiModel } from "./openai-model.js";
+import { resolveAiModel } from "./ai-model.js";
 
 const OUT = path.join(import.meta.dirname, "verify-strong-runs");
 
@@ -241,10 +241,10 @@ function deepCodeReview(source: string, tags: string[], prompt: string): string[
 
 await mkdir(OUT, { recursive: true });
 
-const apiKey = process.env.OPENAI_API_KEY;
-const model = resolveOpenAiModel();
+const apiKey = process.env.ANTHROPIC_API_KEY;
+const model = resolveAiModel();
 if (!apiKey) {
-  console.error("OPENAI_API_KEY missing");
+  console.error("ANTHROPIC_API_KEY missing");
   process.exit(1);
 }
 

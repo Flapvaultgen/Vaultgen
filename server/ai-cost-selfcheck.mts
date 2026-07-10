@@ -9,7 +9,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
-  anthropicBaseUrlFrom,
   buildAnthropicRequest,
   createAiUsageTotals,
   estimateCallCostUsd,
@@ -29,11 +28,6 @@ function check(name: string, ok: boolean) {
     failures++;
   }
 }
-
-// ── Anthropic base URL normalization ─────────────────────────────────────────
-check("anthropic base URL strips /v1/ suffix", anthropicBaseUrlFrom("https://api.anthropic.com/v1/") === "https://api.anthropic.com");
-check("anthropic base URL strips /v1 suffix", anthropicBaseUrlFrom("https://api.anthropic.com/v1") === "https://api.anthropic.com");
-check("anthropic base URL undefined passthrough", anthropicBaseUrlFrom(undefined) === undefined);
 
 // ── Request shaping + cache_control placement ─────────────────────────────────
 const req = buildAnthropicRequest({

@@ -71,7 +71,7 @@ cd ../server && npm install
 
 # API keys (server)
 cp server/.env.example server/.env.local
-# Edit server/.env.local — at minimum set OPENAI_API_KEY
+# Edit server/.env.local — at minimum set ANTHROPIC_API_KEY
 
 # Run UI + API together
 cd ../web && npm run dev:all
@@ -97,10 +97,10 @@ Connect MetaMask when prompted — you'll sign one message to prove wallet owner
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `OPENAI_API_KEY` | Yes | Your Anthropic key (`sk-ant-…`) |
-| `OPENAI_MODEL` | Yes | Primary model — e.g. `claude-sonnet-5` for codegen, planning, and repair |
-| `OPENAI_CHEAP_MODEL` | Recommended | Cheaper model for advisory calls (scope, economic critic) — e.g. `claude-haiku-4-5` |
-| `OPENAI_ESCALATION_MODEL` | Optional | Stronger model for one final repair escalation attempt — e.g. `claude-opus-4` |
+| `ANTHROPIC_API_KEY` | Yes | Your Anthropic key (`sk-ant-…`) |
+| `AI_MODEL` | Yes | Primary model — e.g. `claude-sonnet-5` for codegen, planning, and repair |
+| `AI_CHEAP_MODEL` | Recommended | Cheaper model for advisory calls (scope, economic critic) — e.g. `claude-haiku-4-5` |
+| `AI_ESCALATION_MODEL` | Optional | Stronger model for one final repair escalation attempt — e.g. `claude-opus-4` |
 | `AUTH_SECRET` | **Yes in prod** | Signs wallet session tokens — use `openssl rand -hex 32`; unset = random per-process (sessions reset on restart) |
 | `CORS_ORIGIN` | Yes | Your Vercel URL, e.g. `https://flapvaultgen.vercel.app` |
 | `SUPABASE_URL` | Recommended | Chat/token history persistence; in-memory fallback if unset |
@@ -121,7 +121,7 @@ cd server && npm run test:scanners
 # Web selfchecks (validation, vault UI bridge, i18n)
 cd web && npm test
 
-# Live codegen trial (generates 3 vaults — needs OPENAI_API_KEY)
+# Live codegen trial (generates 3 vaults — needs ANTHROPIC_API_KEY)
 cd server && npx tsx verify-codegen.mts
 ```
 

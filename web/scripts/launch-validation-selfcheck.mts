@@ -219,11 +219,11 @@ check(
 const chatApi = readFileSync(join(here, "../src/lib/chat-api.ts"), "utf8");
 check("service role key not in frontend chat-api", !chatApi.includes("SERVICE_ROLE"));
 
-const openaiModel = readFileSync(join(here, "../../server/openai-model.ts"), "utf8");
-check("model routing still in openai-model.ts", openaiModel.includes("resolveOpenAiModel"));
+const aiModel = readFileSync(join(here, "../../server/ai-model.ts"), "utf8");
+check("model routing still in ai-model.ts", aiModel.includes("resolveAiModel"));
 
 const chatRoutes = readFileSync(join(here, "../../server/chat-routes.ts"), "utf8");
-check("chat routes delegate model to openai-model", chatRoutes.includes("resolveOpenAiModel"));
+check("chat routes delegate model to ai-model", chatRoutes.includes("resolveAiModel"));
 
 // ── summary ───────────────────────────────────────────────────────────────────
 

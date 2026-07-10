@@ -13,7 +13,7 @@
  *     claim/withdraw; cancelled-resource-stuck-user → user-callable exit after
  *     closure; missing status view → expose lifecycle states + update schema.
  *  5. Repair attempts are capped (2 normal + 1 escalation only when
- *     OPENAI_ESCALATION_MODEL is set).
+ *     AI_ESCALATION_MODEL is set).
  *  6. Model routing stays environment-driven — no expensive model literal in
  *     repair logic; escalation/cheap models resolve from env only.
  *  7. The critic remains advisory: deploy-gate and pipeline gating never
@@ -35,7 +35,7 @@ import {
   summarizeRemainingIssues,
 } from "./critic-repair.js";
 import type { CriticFinding, EconomicCriticReport } from "./economic-critic.js";
-import { DEFAULT_OPENAI_MODEL, resolveCheapModel, resolveEscalationModel, resolveOpenAiModel } from "./openai-model.js";
+import { DEFAULT_MODEL, resolveCheapModel, resolveEscalationModel, resolveAiModel } from "./ai-model.js";
 import { inferMechanicSpecFromPrompt } from "./mechanic-spec.js";
 
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -180,15 +180,15 @@ check(
 );
 
 // ── 6. Env-driven model routing ──────────────────────────────────────────────
-check("default model resolves from env", resolveOpenAiModel({ OPENAI_MODEL: "custom-model" }) === "custom-model");
-check("default model falls back to central default", resolveOpenAiModel({}) === DEFAULT_OPENAI_MODEL);
+check("default model resolves from env", resolveAiModel({ AI_MODEL: "custom-model" }) === "custom-model");
+check("default model falls back to central default", resolveAiModel({}) === DEFAULT_MODEL);
 check("escalation model is null when env missing (no escalation)", resolveEscalationModel({}) === null);
 check(
   "escalation model resolves only from env",
-  resolveEscalationModel({ OPENAI_ESCALATION_MODEL: "expensive-model" }) === "expensive-model"
+  resolveEscalationModel({ AI_ESCALATION_MODEL: "expensive-model" }) === "expensive-model"
 );
-check("cheap model falls back to default model when unset", resolveCheapModel({ OPENAI_MODEL: "base-x" }) === "base-x");
-check("cheap model resolves from env when set", resolveCheapModel({ OPENAI_CHEAP_MODEL: "tiny-x" }) === "tiny-x");
+check("cheap model falls back to default model when unset", resolveCheapModel({ AI_MODEL: "base-x" }) === "base-x");
+check("cheap model resolves from env when set", resolveCheapModel({ AI_CHEAP_MODEL: "tiny-x" }) === "tiny-x");
 
 const criticRepairSource = await readFile(path.join(SERVER_DIR, "critic-repair.ts"), "utf8");
 check(

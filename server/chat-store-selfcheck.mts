@@ -38,7 +38,7 @@ import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 // instead of a real LLM call (this selfcheck must stay networkless).
 delete process.env.SUPABASE_URL;
 delete process.env.SUPABASE_SERVICE_ROLE_KEY;
-delete process.env.OPENAI_API_KEY;
+delete process.env.ANTHROPIC_API_KEY;
 
 import { getChatStore, MemoryChatStore, setChatStoreForTests } from "./chat-store.ts";
 import { getSupabaseAdmin, isSupabaseConfigured } from "./supabase.ts";

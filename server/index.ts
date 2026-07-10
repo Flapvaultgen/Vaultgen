@@ -1,5 +1,5 @@
 import dotenv from "dotenv";
-// .env.local must win over a stale OPENAI_API_KEY in the shell (common dev pitfall).
+// .env.local must win over a stale ANTHROPIC_API_KEY in the shell (common dev pitfall).
 dotenv.config({ path: ".env.local", override: true });
 dotenv.config();
 import cors from "cors";
@@ -17,7 +17,7 @@ function parseConsent(value: unknown): ApproximationConsent | undefined {
   return value === "closest_draft" || value === "spec_only" ? value : undefined;
 }
 import { runSpecAudit } from "./spec-audit.js";
-import { resolveOpenAiModel } from "./openai-model.js";
+import { resolveAiModel } from "./ai-model.js";
 import { createChatRouter } from "./chat-routes.js";
 import { isSupabaseConfigured } from "./supabase.js";
 
@@ -57,8 +57,8 @@ app.get("/", (_req, res) => {
 app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
-    aiMode: process.env.OPENAI_API_KEY ? "openai" : "stub",
-    model: resolveOpenAiModel(),
+    aiMode: process.env.ANTHROPIC_API_KEY ? "anthropic" : "stub",
+    model: resolveAiModel(),
     chatStorage: isSupabaseConfigured() ? "supabase" : "memory",
   });
 });
@@ -78,8 +78,8 @@ app.post("/api/codegen-vault", async (req, res) => {
       return;
     }
 
-    const apiKey = process.env.OPENAI_API_KEY;
-    const model = resolveOpenAiModel();
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    const model = resolveAiModel();
 
     const result = await generateVaultCode(prompt, apiKey, model, parseConsent(req.body?.approximationConsent));
     res.json(result);
@@ -107,8 +107,8 @@ app.post("/api/codegen-vault-stream", async (req, res) => {
   };
 
   try {
-    const apiKey = process.env.OPENAI_API_KEY;
-    const model = resolveOpenAiModel();
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    const model = resolveAiModel();
     await generateVaultCodeStream(prompt, apiKey, model, send, parseConsent(req.body?.approximationConsent));
   } catch (err) {
     console.error("codegen stream failed:", err);
@@ -146,8 +146,8 @@ app.post("/api/codegen-vault-refine-stream", async (req, res) => {
   };
 
   try {
-    const apiKey = process.env.OPENAI_API_KEY;
-    const model = resolveOpenAiModel();
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    const model = resolveAiModel();
     await generateVaultCodeRefineStream(message, session, apiKey, model, send);
   } catch (err) {
     console.error("codegen refine stream failed:", err);
@@ -165,8 +165,8 @@ app.post("/api/spec-audit", async (req, res) => {
       res.status(400).json({ error: "source must be at least 32 characters." });
       return;
     }
-    const apiKey = process.env.OPENAI_API_KEY;
-    const model = resolveOpenAiModel();
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    const model = resolveAiModel();
     const audit = await runSpecAudit(source, contractName, apiKey, model, { compiled: true });
     res.json(audit);
   } catch (err) {
@@ -177,5 +177,5 @@ app.post("/api/spec-audit", async (req, res) => {
 
 app.listen(port, "0.0.0.0", () => {
   console.log(`Flap Vault Gen API http://localhost:${port}`);
-  console.log(`Mode: ${process.env.OPENAI_API_KEY ? "OpenAI" : "stub (set OPENAI_API_KEY)"}`);
+  console.log(`Mode: ${process.env.ANTHROPIC_API_KEY ? "Anthropic" : "stub (set ANTHROPIC_API_KEY)"}`);
 });

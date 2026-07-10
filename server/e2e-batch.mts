@@ -5,7 +5,7 @@ dotenv.config();
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { generateVaultCode, scanSafety } from "./codegen.ts";
-import { resolveOpenAiModel } from "./openai-model.js";
+import { resolveAiModel } from "./ai-model.js";
 
 const OUT = path.join(import.meta.dirname, "e2e-runs");
 
@@ -96,7 +96,7 @@ for (const s of SCENARIOS) {
   const t0 = Date.now();
   process.stdout.write(`\n=== ${s.name} ===\n`);
   try {
-    const result = await generateVaultCode(s.prompt, process.env.OPENAI_API_KEY, resolveOpenAiModel());
+    const result = await generateVaultCode(s.prompt, process.env.ANTHROPIC_API_KEY, resolveAiModel());
     const elapsedSec = (Date.now() - t0) / 1000;
     const childStart = result.source.indexOf(`contract ${result.contractName}`);
     const childBody = childStart >= 0 ? result.source.slice(childStart) : result.source;

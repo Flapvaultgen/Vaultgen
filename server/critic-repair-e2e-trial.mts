@@ -11,28 +11,28 @@ dotenv.config();
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { generateVaultCode, cleanupCodegen } from "./codegen.ts";
-import { resolveOpenAiModel, resolveEscalationModel } from "./openai-model.js";
+import { resolveAiModel, resolveEscalationModel } from "./ai-model.js";
 import { isDeployReady, getDeployBlockReason } from "../web/src/lib/deploy-gate.ts";
 
 const PROMPT =
   "Make a quest-proof reward vault where holders submit quest proof, the manager approves or rejects each submission, and approved users claim manager-assigned BNB rewards from the tax reward bucket.";
 
-if (!process.env.OPENAI_API_KEY) {
-  console.error("SKIPPED: OPENAI_API_KEY missing — no live E2E trial possible.");
+if (!process.env.ANTHROPIC_API_KEY) {
+  console.error("SKIPPED: ANTHROPIC_API_KEY missing — no live E2E trial possible.");
   process.exit(2);
 }
 
 const start = Date.now();
-console.log(`Model: ${resolveOpenAiModel()} | escalation: ${resolveEscalationModel() ?? "(unset — disabled)"}`);
+console.log(`Model: ${resolveAiModel()} | escalation: ${resolveEscalationModel() ?? "(unset — disabled)"}`);
 console.log("Generating (this can take a few minutes)…");
 
-let result = await generateVaultCode(PROMPT, process.env.OPENAI_API_KEY, resolveOpenAiModel());
+let result = await generateVaultCode(PROMPT, process.env.ANTHROPIC_API_KEY, resolveAiModel());
 if (result.deliverable === "design_questions" || result.deliverable === "consent_required") {
   console.log(
     `Pipeline paused (${result.deliverable}) — answering with explicit "closest_draft" consent like the studio UI:`
   );
   for (const q of result.designQuestions) console.log(`  Q: ${q.question}`);
-  result = await generateVaultCode(PROMPT, process.env.OPENAI_API_KEY, resolveOpenAiModel(), "closest_draft");
+  result = await generateVaultCode(PROMPT, process.env.ANTHROPIC_API_KEY, resolveAiModel(), "closest_draft");
 }
 const elapsedSec = Math.round((Date.now() - start) / 100) / 10;
 
@@ -41,7 +41,7 @@ const highBlocking =
 
 const summary = {
   elapsedSec,
-  model: resolveOpenAiModel(),
+  model: resolveAiModel(),
   escalationModel: resolveEscalationModel(),
   deliverable: result.deliverable,
   compiled: result.compiled,

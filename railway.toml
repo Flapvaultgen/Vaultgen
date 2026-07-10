@@ -1,4 +1,4 @@
-# Railway: Docker build (Node 22 + Foundry). Set OPENAI_API_KEY in Railway Variables.
+# Railway: Docker build (Node 22 + Foundry). Set ANTHROPIC_API_KEY in Railway Variables.
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
