@@ -14,8 +14,8 @@ Each generation runs a closed loop until it passes or exhausts its retry budget:
 
 | Step | What runs | Purpose |
 |------|-----------|---------|
-| **0. Classify** | `classifyVaultPlan()` | JSON vault kind + buckets + invariants before codegen |
-| **0b. Mechanic design** | `expandMechanicDesign()` | Lifecycle contract for novel prompts (milestone, register+claim, …) |
+| **0. Scope check** | `classifyVaultScope()` | Verdict (launch-ready / draft-only / refused) before any code is written |
+| **0b. Mechanic spec** | `planMechanicSpec()` | Authoritative plan: actors, buckets, actions, payout rules, lifecycle |
 | **1. Draft** | Anthropic Claude | Writes a complete vault inheriting `CodegenVaultBase` / Flap V2 |
 | **2. Compile** | Foundry (`forge build`, solc 0.8.26) | Real compile against Flap interfaces; compile errors feed back to AI |
 | **3. Dual safety scan** | `scanSafetyCombined()` | Logic + mechanic completeness scanners |

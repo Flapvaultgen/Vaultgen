@@ -39,8 +39,12 @@ web/               React studio UI (Vite + Tailwind)
       i18n/                 — English + Simplified Chinese translations
 
 server/            Node.js AI pipeline + HTTP API (tsx / ESM)
-  codegen.ts              — main pipeline, system prompt, PREAMBLE, scanners
-  vault-plan.ts           — vault kind classification + mechanic lifecycle design
+  codegen.ts              — pipeline orchestrator + safety scanners
+  codegen-prompts.ts      — system prompts + injected PREAMBLE base contract
+  codegen-compile.ts      — forge compile gate, artifact reads, EIP-170 rescue
+  codegen-patches.ts      — deterministic pre-scan source patches
+  solidity-parse.ts       — shared Solidity function/schema extraction helpers
+  mechanic-spec.ts        — MechanicSpec planner (the authoritative product plan)
   vault-scope.ts          — scope verdict (launch_ready / draft_only / out_of_scope)
   mechanic-completeness.ts — structural UI/mechanic scanners
   test-gen.ts             — AI-generated fork integration tests
