@@ -10,7 +10,6 @@ import {
   MessageSquarePlus,
   RotateCcw,
   Send,
-  Sparkles,
   Wallet,
 } from "lucide-react";
 import { useAccount, useChainId } from "wagmi";
@@ -49,7 +48,6 @@ import { Textarea } from "./components/ui/textarea";
 import { Badge } from "./components/ui/badge";
 import { cn } from "./lib/utils";
 import { useI18n } from "./lib/i18n/context";
-import { VAULT_GENERATION_ENABLED } from "./lib/studio-flags";
 
 type ConsentPrompt = {
   message: string;
@@ -282,7 +280,7 @@ export default function ChatPage({ chatId }: Props) {
 
   const onSend = useCallback(() => {
     const text = input.trim();
-    if (text.length < 8 || sending || streaming || !walletConnected || !VAULT_GENERATION_ENABLED) return;
+    if (text.length < 8 || sending || streaming || !walletConnected) return;
     setInput("");
     void startNewRun(text);
   }, [input, sending, streaming, walletConnected, startNewRun]);
@@ -506,10 +504,6 @@ export default function ChatPage({ chatId }: Props) {
             {!walletConnected ? (
               <p className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
                 <Wallet className="size-3.5 shrink-0" /> {dict.chatPage.walletNotice}
-              </p>
-            ) : !VAULT_GENERATION_ENABLED ? (
-              <p className="inline-flex items-center gap-1.5 rounded-md border border-primary/30 bg-primary/10 px-3 py-2 text-xs text-primary">
-                <Sparkles className="size-3.5 shrink-0" /> {dict.hero.comingSoonNotice}
               </p>
             ) : (
               <div className="flex gap-2">

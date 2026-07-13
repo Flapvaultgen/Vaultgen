@@ -31,12 +31,9 @@ export interface Dictionary {
     walletNotice: string;
     placeholderConnected: string;
     placeholderDisconnected: string;
-    comingSoonNotice: string;
-    comingSoonPlaceholder: string;
     examplesLabel: string;
     generate: string;
     generating: string;
-    comingSoon: string;
     trustLine: string;
     examples: string[];
   };
