@@ -48,11 +48,75 @@ import { Textarea } from "./components/ui/textarea";
 import { Badge } from "./components/ui/badge";
 import { cn } from "./lib/utils";
 import { useI18n } from "./lib/i18n/context";
+import type { Dictionary } from "./lib/i18n/types";
 
 type ConsentPrompt = {
   message: string;
   options: { id: ApproximationConsent | "stop"; label: string }[];
 };
+
+type ProgressDict = Dictionary["chatPage"]["progress"];
+
+/**
+ * Maps raw pipeline events to short, friendly stage labels. Raw scanner
+ * findings / compiler errors (rule IDs, solc output) stay out of the progress
+ * log — the review tab shows the technical detail after the run.
+ */
+function progressLineFor(ev: RunStreamEvent, p: ProgressDict): string | null {
+  const payload = (ev.payload ?? {}) as Record<string, unknown>;
+  switch (ev.type) {
+    case "run_started":
+      return p.planning;
+    case "status": {
+      if (payload.connected) return p.connecting;
+      if (payload.error) return ev.message ?? null; // real errors stay verbatim
+      if (payload.codeReset) {
+        const pass = Number(payload.attempt ?? 0);
+        return payload.reason === "initial" || pass <= 1 ? p.writing : p.rewriting.replace("{pass}", String(pass));
+      }
+      if (typeof payload.contractName === "string") return p.contractName.replace("{name}", payload.contractName);
+      if (typeof payload.explanation === "string") return p.finalizing;
+      switch (payload.phase) {
+        case "classifying":
+          return p.planning;
+        case "writing":
+          return p.writing;
+        case "compiling":
+          return p.compiling;
+        case "compile_failed":
+          return p.fixingCompile;
+        case "fixing":
+          return p.fixingSafety;
+        case "fixing_spec":
+          return p.improvingCompat;
+        case "test_fix":
+          return p.fixingTests;
+        case "generating_tests":
+          return p.generatingTests;
+        case "auditing":
+          return p.auditing;
+        case "ui_gen":
+          return p.designingUi;
+        case "done":
+          return p.finalizing;
+        default:
+          return null;
+      }
+    }
+    case "repair_attempt":
+      return p.repairing;
+    case "simulation_report":
+      return p.simulationDone;
+    case "economic_critique":
+      return p.economicReview;
+    case "code_complete":
+      return p.finalizing;
+    // mechanic_spec / scope / scanner_result carry technical payloads already
+    // summarized by the surrounding status events.
+    default:
+      return null;
+  }
+}
 
 type ResultTab = "code" | "review" | "ui" | "launch";
 
@@ -127,7 +191,7 @@ export default function ChatPage({ chatId }: Props) {
       abortRef.current = controller;
 
       setActiveRunId(runId);
-      setProgress("Connecting…");
+      setProgress(dict.chatPage.progress.connecting);
       setProgressLog([]);
       setLiveCode("");
       setResult(null);
@@ -171,10 +235,11 @@ export default function ChatPage({ chatId }: Props) {
             break;
           }
           default: {
-            if (ev.message) {
-              setProgress(ev.message);
+            const line = progressLineFor(ev, dict.chatPage.progress);
+            if (line) {
+              setProgress(line);
               setProgressLog((log) =>
-                log[log.length - 1] === ev.message ? log : [...log.slice(-11), ev.message!]
+                log[log.length - 1] === line ? log : [...log.slice(-11), line]
               );
             }
           }
@@ -192,7 +257,7 @@ export default function ChatPage({ chatId }: Props) {
           if (!controller.signal.aborted) setProgress(null);
         });
     },
-    [chatId, refreshMessages]
+    [chatId, refreshMessages, dict]
   );
 
   // Initial load: chat, messages, sidebar, storage mode, artifacts, active run.

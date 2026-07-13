@@ -105,6 +105,26 @@ export interface Dictionary {
     composerPlaceholderIdle: string;
     outputLabel: string;
     backToStudio: string;
+    /** Friendly stage labels for the live progress log ({pass}/{name} are replaced). */
+    progress: {
+      connecting: string;
+      planning: string;
+      writing: string;
+      rewriting: string;
+      compiling: string;
+      fixingCompile: string;
+      fixingSafety: string;
+      improvingCompat: string;
+      generatingTests: string;
+      fixingTests: string;
+      simulationDone: string;
+      auditing: string;
+      economicReview: string;
+      repairing: string;
+      designingUi: string;
+      finalizing: string;
+      contractName: string;
+    };
   };
 
   chatsLandingPage: {
