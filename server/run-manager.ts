@@ -210,7 +210,7 @@ export class RunManager {
         break;
       }
       case "code_reset":
-        await this.event(run, "status", ev.message ?? `Rewriting contract (pass ${ev.attempt})…`, {
+        await this.event(run, "status", ev.message ?? (ev.reason === "initial" ? "Writing the contract…" : `Rewriting contract (pass ${ev.attempt})…`), {
           attempt: ev.attempt,
           reason: ev.reason,
           codeReset: true,

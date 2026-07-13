@@ -114,7 +114,13 @@ export type AiCompletionParams = {
 };
 
 export type AiCompletion = { choices: { message?: { content?: string | null } }[] };
-export type AiCompletionChunk = { choices: { delta?: { content?: string | null } }[] };
+export type AiCompletionChunk = {
+  choices: {
+    delta?: { content?: string | null };
+    /** Set on the final chunk: "max_tokens" means the output was truncated at the cap. */
+    finish_reason?: string | null;
+  }[];
+};
 
 export type AiChatClient = {
   chat: {
@@ -255,6 +261,9 @@ export function createAiClient(apiKey: string): AiChatClient {
           usage.cacheWriteInputTokens = u.cacheWriteInputTokens;
         } else if (event.type === "message_delta") {
           usage.outputTokens = event.usage?.output_tokens ?? usage.outputTokens;
+          if (event.delta.stop_reason === "max_tokens") {
+            yield { choices: [{ delta: {}, finish_reason: "max_tokens" }] };
+          }
         } else if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
           yield { choices: [{ delta: { content: event.delta.text } }] };
         }

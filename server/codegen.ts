@@ -2007,7 +2007,7 @@ async function aiGenerateStream(
   emit: (ev: CodegenEvent) => void,
   attempt: number,
   lastFix?: FixLogEntry
-): Promise<{ raw: string; contractName: string; code: string; explanation: string }> {
+): Promise<{ raw: string; contractName: string; code: string; explanation: string; truncated: boolean }> {
   emit({ type: "code_reset", attempt, ...describeCodeReset(lastFix, attempt) });
   const stream = await client.chat.completions.create({
     model,
@@ -2020,8 +2020,10 @@ async function aiGenerateStream(
 
   let full = "";
   let codeStarted = false;
+  let truncated = false;
   const MARKER = "SOLIDITY:";
   for await (const chunk of stream) {
+    if (chunk.choices[0]?.finish_reason === "max_tokens") truncated = true;
     const delta = chunk.choices[0]?.delta?.content ?? "";
     if (!delta) continue;
     full += delta;
@@ -2043,6 +2045,7 @@ async function aiGenerateStream(
     contractName: sanitizeName(parsed.name),
     code: stripImports(parsed.code),
     explanation: parsed.explanation,
+    truncated,
   };
 }
 
@@ -2379,12 +2382,14 @@ async function runCodegenPipeline(opts: {
     status(attempts === 1 ? "writing" : lastFix?.phase === "test_fix" ? "test_fix" : lastFix?.phase === "spec_fix" ? "fixing_spec" : "fixing");
 
     let lastAssistant: string;
+    let outputTruncated = false;
     if (stream && emit) {
       const gen = await aiGenerateStream(client, model, messages, emit, attempts, lastFix);
       lastAssistant = gen.raw;
       contractName = gen.contractName;
       code = gen.code;
       explanation = gen.explanation || explanation;
+      outputTruncated = gen.truncated;
     } else {
       const gen = await aiGenerateJson(client, model, messages);
       lastAssistant = gen.raw;
@@ -2407,10 +2412,18 @@ async function runCodegenPipeline(opts: {
     filePath = res.filePath;
 
     if (!ok) {
-      pushFix({ phase: "compile_fix", attempt: attempts, message: firstErrors(compileErrors) });
-      status("compile_failed", firstErrors(compileErrors));
+      pushFix({
+        phase: "compile_fix",
+        attempt: attempts,
+        message: outputTruncated ? `Output truncated at the token cap. ${firstErrors(compileErrors)}` : firstErrors(compileErrors),
+      });
+      status("compile_failed", outputTruncated ? "The draft was too long and got cut off — retrying with a smaller contract…" : firstErrors(compileErrors));
       messages.push({ role: "assistant", content: lastAssistant });
-      pendingFix = stream ? compileFixPromptStream(compileErrors) : compileFixPrompt(compileErrors);
+      pendingFix = outputTruncated
+        ? truncatedOutputFixPrompt()
+        : stream
+          ? compileFixPromptStream(compileErrors)
+          : compileFixPrompt(compileErrors);
       continue;
     }
 
@@ -2527,6 +2540,7 @@ async function runCodegenPipeline(opts: {
     messages = pruneRetryHistory(messages, messagesHeadLength, fixLog);
 
     let lastAssistant: string;
+    let outputTruncated = false;
     if (stream && emit) {
       const gen = await aiGenerateStream(client, model, messages, emit, attempts, {
         phase: "test_fix",
@@ -2538,6 +2552,7 @@ async function runCodegenPipeline(opts: {
       contractName = gen.contractName;
       code = gen.code;
       explanation = gen.explanation || explanation;
+      outputTruncated = gen.truncated;
     } else {
       const gen = await aiGenerateJson(client, model, messages);
       lastAssistant = gen.raw;
@@ -2560,7 +2575,11 @@ async function runCodegenPipeline(opts: {
 
     if (!ok) {
       pushFix({ phase: "compile_fix", attempt: attempts, message: firstErrors(compileErrors) });
-      pendingFix = stream ? compileFixPromptStream(compileErrors) : compileFixPrompt(compileErrors);
+      pendingFix = outputTruncated
+        ? truncatedOutputFixPrompt()
+        : stream
+          ? compileFixPromptStream(compileErrors)
+          : compileFixPrompt(compileErrors);
       messages.push({ role: "assistant", content: lastAssistant });
       continue;
     }
@@ -3274,6 +3293,23 @@ Return the corrected JSON (same shape, no imports/pragma).
 Blocking issues (grouped by Flap rule):
 
 ${list}`;
+}
+
+/**
+ * The previous draft hit the output-token cap and was cut off mid-contract.
+ * Replaying compile errors would make the model re-emit the same oversized
+ * contract and truncate again, so this asks for a deliberately smaller rewrite.
+ */
+function truncatedOutputFixPrompt(): string {
+  return `Your previous output hit the maximum output-token limit and was CUT OFF mid-contract — that is the only reason it failed to compile. Do NOT repeat the same design or try to continue it.
+
+Rewrite the contract from scratch at roughly HALF the size:
+- Keep the core mechanic from the spec; drop nice-to-have views, admin extras, and redundant events.
+- Merge similar functions; prefer fewer, more generic ones.
+- Keep comments to one short line each.
+- Remember the deployed bytecode must also fit the 24,576-byte EIP-170 limit — smaller is safer.
+
+Re-output in the SAME plain-text format (CONTRACT_NAME / EXPLANATION / SOLIDITY).`;
 }
 
 function compileFixPromptStream(errors: string): string {

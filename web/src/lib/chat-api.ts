@@ -303,48 +303,95 @@ export function archiveChat(chatId: string): Promise<Chat> {
   return postJson(`/api/chats/${chatId}/archive`, {});
 }
 
-/** Consume the run SSE stream; resolves when the server closes it. */
+/**
+ * Consume the run SSE stream; resolves when the run reaches a terminal event.
+ *
+ * Hosting proxies (Railway cuts any request at ~990s) can drop the SSE
+ * connection long before a slow generation finishes, while the pipeline keeps
+ * running server-side. So this reconnects automatically until it sees a
+ * terminal event (run_completed / run_failed). On reconnect the server replays
+ * the full event buffer; already-seen events are skipped by sequence number so
+ * progress logs and streamed code never duplicate.
+ */
 export async function streamRunEvents(
   runId: string,
   onEvent: (ev: RunStreamEvent) => void,
   signal?: AbortSignal
 ): Promise<void> {
   await initApiBase();
-  let res: Response;
-  try {
-    res = await fetch(apiUrl(`/api/runs/${runId}/stream`), { signal, headers: authHeaders() });
-  } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") return;
-    throw new Error("Can't reach the AI server. Start it with `npm run dev:all`.");
-  }
-  if (!res.ok || !res.body) {
-    const body = await res.json().catch(() => null);
-    throw new Error(body?.error ?? `Stream failed (${res.status})`);
-  }
 
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  try {
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let idx: number;
-      while ((idx = buffer.indexOf("\n\n")) >= 0) {
-        const raw = buffer.slice(0, idx).trim();
-        buffer = buffer.slice(idx + 2);
-        if (raw.startsWith("data:")) {
-          try {
-            onEvent(JSON.parse(raw.slice(5).trim()) as RunStreamEvent);
-          } catch {
-            /* ignore malformed chunk */
+  let lastSequence = -1;
+  let sawTerminal = false;
+  let connectionsWithoutProgress = 0;
+
+  const deliver = (ev: RunStreamEvent) => {
+    if (ev.type === "heartbeat") return;
+    if (typeof ev.sequence === "number" && ev.sequence >= 0) {
+      if (ev.sequence <= lastSequence) return; // replayed event after reconnect
+      lastSequence = ev.sequence;
+    }
+    if (ev.type === "run_completed" || ev.type === "run_failed") sawTerminal = true;
+    onEvent(ev);
+  };
+
+  for (;;) {
+    let res: Response;
+    try {
+      res = await fetch(apiUrl(`/api/runs/${runId}/stream`), { signal, headers: authHeaders() });
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      // Never connected at all — only worth an error on the first attempt.
+      if (lastSequence < 0) throw new Error("Can't reach the AI server. Start it with `npm run dev:all`.");
+      res = null as unknown as Response;
+    }
+
+    if (res) {
+      if (!res.ok || !res.body) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error ?? `Stream failed (${res.status})`);
+      }
+
+      const before = lastSequence;
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let idx: number;
+          while ((idx = buffer.indexOf("\n\n")) >= 0) {
+            const raw = buffer.slice(0, idx).trim();
+            buffer = buffer.slice(idx + 2);
+            if (raw.startsWith("data:")) {
+              try {
+                deliver(JSON.parse(raw.slice(5).trim()) as RunStreamEvent);
+              } catch {
+                /* ignore malformed chunk */
+              }
+            }
           }
         }
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        // Connection dropped mid-stream (proxy timeout, network blip) — reconnect below.
+      }
+
+      if (sawTerminal) return;
+      connectionsWithoutProgress = lastSequence > before ? 0 : connectionsWithoutProgress + 1;
+      if (connectionsWithoutProgress >= 5) {
+        throw new Error("Stream lost — the run may still be finishing. Reload the page to check.");
+      }
+    } else {
+      connectionsWithoutProgress++;
+      if (connectionsWithoutProgress >= 5) {
+        throw new Error("Can't reach the AI server. Check your connection and reload the page.");
       }
     }
-  } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") return;
-    throw err;
+
+    if (signal?.aborted) return;
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    if (signal?.aborted) return;
   }
 }
