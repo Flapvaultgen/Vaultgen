@@ -32,8 +32,27 @@ function corsOriginAllowed(origin: string | undefined): boolean {
   if (!origin) return true;
   if (!corsOrigins?.length) return true;
   if (corsOrigins.includes(origin)) return true;
+  // www ↔ apex: CORS_ORIGIN often lists only one; browsers send the exact page origin.
+  for (const allowed of corsOrigins) {
+    try {
+      const u = new URL(allowed);
+      const host = u.hostname;
+      const proto = u.protocol;
+      if (host.startsWith("www.")) {
+        const apex = `${proto}//${host.slice(4)}`;
+        if (origin === apex) return true;
+      } else {
+        const www = `${proto}//www.${host}`;
+        if (origin === www) return true;
+      }
+    } catch {
+      /* ignore malformed entries */
+    }
+  }
   // Vercel production + preview URLs (avoids "offline" when alias or preview domain changes).
-  return /^https:\/\/flapvaultgen(-[a-z0-9-]+)?\.vercel\.app$/i.test(origin);
+  if (/^https:\/\/flapvaultgen(-[a-z0-9-]+)?\.vercel\.app$/i.test(origin)) return true;
+  // Custom production domain (with or without www).
+  return /^https:\/\/(www\.)?flapvaultgen\.sh$/i.test(origin);
 }
 
 app.use(
