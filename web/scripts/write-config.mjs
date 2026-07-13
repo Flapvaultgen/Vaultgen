@@ -15,7 +15,7 @@ try {
   /* fresh */
 }
 
-// On Vercel, /api is proxied to Railway (see root vercel.json) — same-origin avoids CORS on every deploy URL.
+// On Vercel, set VITE_API_URL to your Railway API URL at build time (see web/vercel.json).
 const raw = (process.env.VITE_API_URL ?? "").trim().replace(/\/$/, "");
 const apiUrl = process.env.VERCEL
   ? ""
