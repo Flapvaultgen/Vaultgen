@@ -11,9 +11,6 @@ broadcast/
 # Local scratch
 misc/
 
-# Separate website-generator experiment — not part of this release
-websitegen/
-
 # Dotenv files
 .env
 .env.*

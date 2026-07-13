@@ -36,9 +36,12 @@ export const zh: Dictionary = {
     placeholderConnected:
       "用中文或英文描述任意符合 Flap 规则的金库机制 — 参与者、资金池、操作、分配方式。AI 会先规划，再生成 Solidity 代码、测试它，并告诉你是否已可上线，还是仅为草案。",
     placeholderDisconnected: "请先在上方连接钱包…",
+    comingSoonNotice: "金库生成功能即将上线，敬请期待。",
+    comingSoonPlaceholder: "金库生成即将上线…",
     examplesLabel: "试试这些想法",
     generate: "生成 Solidity",
     generating: "生成中…",
+    comingSoon: "即将上线",
     trustLine: "自动执行 9 条 Flap 安全规则 · 支持中文与英文",
     examples: [
       "持币人每周投票决定国库资金池分给哪个慈善钱包",

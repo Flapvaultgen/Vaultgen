@@ -39,9 +39,12 @@ export const en: Dictionary = {
     placeholderConnected:
       "Describe any Flap-compatible vault mechanic — actors, buckets, actions, payouts. Write in English or 中文. The AI plans it, generates Solidity, tests it, and tells you if it's launch-ready or draft-only.",
     placeholderDisconnected: "Connect your wallet above to get started…",
+    comingSoonNotice: "Vault generation is coming soon — stay tuned.",
+    comingSoonPlaceholder: "Vault generation is coming soon…",
     examplesLabel: "Try an idea",
     generate: "Generate Solidity",
     generating: "Generating…",
+    comingSoon: "Coming soon",
     trustLine: "9 Flap safety rules enforced automatically · English & 中文 supported",
     examples: [
       "Holders vote weekly on which charity wallet receives the treasury bucket",

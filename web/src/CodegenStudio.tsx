@@ -51,6 +51,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "./com
 import { Textarea } from "./components/ui/textarea";
 import { Badge } from "./components/ui/badge";
 import { useI18n } from "./lib/i18n/context";
+import { VAULT_GENERATION_ENABLED } from "./lib/studio-flags";
 
 // Free-form mechanic ideas — inspiration, not a menu. Any Flap-compatible
 // mechanic can be described; the AI plans whatever is written. Localized
@@ -441,7 +442,7 @@ export default function CodegenStudio({ onChatActive, heroLayout = false }: Prop
    */
   const onGenerate = async () => {
     const p = prompt.trim();
-    if (p.length < 8 || running || !walletConnected) return;
+    if (p.length < 8 || running || !walletConnected || !VAULT_GENERATION_ENABLED) return;
     setError(null);
     setRunning(true);
     try {
@@ -718,11 +719,22 @@ export default function CodegenStudio({ onChatActive, heroLayout = false }: Prop
           <Wallet className="size-3.5 shrink-0" /> {dict.hero.walletNotice}
         </p>
       )}
+      {walletConnected && !VAULT_GENERATION_ENABLED && (
+        <p className="inline-flex items-center gap-1.5 rounded-md border border-primary/30 bg-primary/10 px-3 py-2 text-xs text-primary">
+          <Sparkles className="size-3.5 shrink-0" /> {dict.hero.comingSoonNotice}
+        </p>
+      )}
       <Textarea
         rows={heroLayout ? 3 : 5}
-        placeholder={walletConnected ? dict.hero.placeholderConnected : dict.hero.placeholderDisconnected}
+        placeholder={
+          !walletConnected
+            ? dict.hero.placeholderDisconnected
+            : VAULT_GENERATION_ENABLED
+              ? dict.hero.placeholderConnected
+              : dict.hero.comingSoonPlaceholder
+        }
         value={prompt}
-        disabled={!walletConnected}
+        disabled={!walletConnected || !VAULT_GENERATION_ENABLED}
         onChange={(e) => setPrompt(e.target.value)}
         className={heroLayout ? "fgv-hero-textarea min-h-[96px] text-sm" : "min-h-[140px] resize-none text-sm"}
         onKeyDown={(e) => {
@@ -737,7 +749,7 @@ export default function CodegenStudio({ onChatActive, heroLayout = false }: Prop
           <button
             key={ex}
             type="button"
-            disabled={!walletConnected}
+            disabled={!walletConnected || !VAULT_GENERATION_ENABLED}
             onClick={() => setPrompt(ex)}
             className="rounded-full border border-border/70 bg-card/60 px-3 py-1.5 text-left text-[0.68rem] text-muted-foreground transition-colors hover:border-primary/40 hover:bg-secondary hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-border/70 disabled:hover:bg-card/60"
           >
@@ -750,11 +762,20 @@ export default function CodegenStudio({ onChatActive, heroLayout = false }: Prop
           variant="default"
           size={heroLayout ? "lg" : "default"}
           onClick={onGenerate}
-          disabled={running || prompt.trim().length < 8 || !walletConnected}
+          disabled={
+            running ||
+            !walletConnected ||
+            !VAULT_GENERATION_ENABLED ||
+            prompt.trim().length < 8
+          }
           className={heroLayout ? "gap-2" : undefined}
         >
           {running ? <Loader2 className="animate-spin" /> : <Sparkles className={heroLayout ? "size-4" : "hidden"} />}
-          {running ? dict.hero.generating : dict.hero.generate}
+          {running
+            ? dict.hero.generating
+            : walletConnected && !VAULT_GENERATION_ENABLED
+              ? dict.hero.comingSoon
+              : dict.hero.generate}
         </Button>
         <span className="text-xs text-muted-foreground">⌘↵</span>
         {error && <p className="text-sm text-destructive">{error}</p>}
