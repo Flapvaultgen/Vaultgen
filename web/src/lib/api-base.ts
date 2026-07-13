@@ -6,12 +6,14 @@ function normalizeApiBase(raw: string): string {
   return `https://${trimmed}`;
 }
 
-/** Same-origin /api when deployed on Vercel (rewrites proxy to Railway). */
+/** Same-origin /api only when no explicit API URL was set at build time. */
 function defaultApiBase(): string {
+  const fromEnv = normalizeApiBase((import.meta.env.VITE_API_URL as string | undefined) ?? "");
+  if (fromEnv) return fromEnv;
   if (typeof window !== "undefined" && /\.vercel\.app$/i.test(window.location.hostname)) {
     return "";
   }
-  return normalizeApiBase((import.meta.env.VITE_API_URL as string | undefined) ?? "");
+  return "";
 }
 
 let apiBase = defaultApiBase();

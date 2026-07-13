@@ -1,8 +1,11 @@
 /**
  * Embeds on-chain artifact bytecodes for browser wallet deploys (CodegenVaultFactory).
  * Run: node web/scripts/export-flap-artifacts.mjs  (after forge build)
+ *
+ * On Vercel there is no Foundry `out/` — we keep the committed flap-artifacts.ts
+ * that was generated locally after `forge build`.
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,8 +18,7 @@ function readBytecode(artifactPath, label) {
   try {
     json = JSON.parse(readFileSync(artifactPath, "utf8"));
   } catch {
-    console.error(`Missing ${label} artifact at ${artifactPath}. Run \`forge build\` first.`);
-    process.exit(1);
+    return null;
   }
   const bytecode = json?.bytecode?.object;
   if (!bytecode?.startsWith("0x")) {
@@ -27,6 +29,19 @@ function readBytecode(artifactPath, label) {
 }
 
 const factoryBytecode = readBytecode(factoryArtifact, "CodegenVaultFactory");
+
+if (!factoryBytecode) {
+  if (existsSync(outPath)) {
+    console.log(
+      "Skipping factory bytecode export — no forge out/ on this machine; using committed web/src/lib/flap-artifacts.ts"
+    );
+    process.exit(0);
+  }
+  console.error(
+    `Missing CodegenVaultFactory artifact at ${factoryArtifact} and no committed ${outPath}. Run \`forge build\` first.`
+  );
+  process.exit(1);
+}
 
 writeFileSync(
   outPath,

@@ -17,13 +17,11 @@ try {
 
 // On Vercel, set VITE_API_URL to your Railway API URL at build time (see web/vercel.json).
 const raw = (process.env.VITE_API_URL ?? "").trim().replace(/\/$/, "");
-const apiUrl = process.env.VERCEL
+const apiUrl = !raw
   ? ""
-  : !raw
-    ? ""
-    : /^https?:\/\//i.test(raw)
-      ? raw
-      : `https://${raw}`;
+  : /^https?:\/\//i.test(raw)
+    ? raw
+    : `https://${raw}`;
 
 const sandboxDeployer = (process.env.VITE_SANDBOX_DEPLOYER ?? "").trim();
 
