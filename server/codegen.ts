@@ -2448,9 +2448,12 @@ async function runCodegenPipeline(opts: {
       });
       status("fixing", blocking.map((b) => b.rule).join(", "));
       messages.push({ role: "assistant", content: lastAssistant });
-      const recentSafety = fixLog.filter((f) => f.phase === "safety_fix").slice(-3);
+      // Second identical failure = the broad rewrite prompt is not converging;
+      // switch to the surgical patch prompt immediately instead of burning
+      // another full rewrite pass on the same finding.
+      const recentSafety = fixLog.filter((f) => f.phase === "safety_fix").slice(-2);
       const stuck =
-        recentSafety.length >= 3 &&
+        recentSafety.length >= 2 &&
         recentSafety.every((f) => f.rule === recentSafety[0]!.rule);
       const sameRuleCount = blocking.filter((b) => previousFailures.has(b.rule)).length;
       pendingFix = stuck || sameRuleCount >= 3
@@ -2650,17 +2653,22 @@ async function runCodegenPipeline(opts: {
     break;
   }
 
-  await runAuditIfReady();
-
   if (!fullSource && code) fullSource = `${PREAMBLE}\n${code.trim()}\n`;
 
-  // Phase 7: advisory economic critic — only worth running on a vault that
-  // actually compiled and passed the deterministic safety scanners; never
-  // blocks the pipeline and never overrides scanSafety/integration results.
+  // Phase 7: advisory tail — the spec pre-audit and the economic critic are
+  // independent cheap-model reads of the same final source, so they run
+  // concurrently. Both are advisory: they never block the pipeline and never
+  // override scanSafety/integration results.
   let economicCritique: EconomicCriticReport | null = null;
   if (ok && safety.level !== "fail" && fullSource) {
-    economicCritique = await runEconomicCriticPass(contractName, fullSource, mechanicSpec, apiKey, advisoryModel);
+    const [, critique] = await Promise.all([
+      runAuditIfReady(),
+      runEconomicCriticPass(contractName, fullSource, mechanicSpec, apiKey, advisoryModel),
+    ]);
+    economicCritique = critique;
     emit?.({ type: "economic_critique", report: economicCritique });
+  } else {
+    await runAuditIfReady();
   }
 
   // Cleanup pass: bounded critic-driven auto-repair. High/blocking critic
