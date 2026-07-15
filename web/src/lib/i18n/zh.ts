@@ -135,6 +135,15 @@ export const zh: Dictionary = {
       finalizing: "正在收尾…",
       contractName: "合约：{name}",
     },
+    milestones: {
+      plan: "规划",
+      code: "编写",
+      build: "构建",
+      test: "测试",
+      review: "审查",
+      ui: "界面",
+      finalize: "完成",
+    },
   },
 
   chatsLandingPage: {

@@ -125,6 +125,16 @@ export interface Dictionary {
       finalizing: string;
       contractName: string;
     };
+    /** Short labels for the milestone stepper. */
+    milestones: {
+      plan: string;
+      code: string;
+      build: string;
+      test: string;
+      review: string;
+      ui: string;
+      finalize: string;
+    };
   };
 
   chatsLandingPage: {

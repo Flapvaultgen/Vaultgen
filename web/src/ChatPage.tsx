@@ -38,6 +38,7 @@ import { loadVaultBytecode, saveVaultBytecode } from "./lib/studio-config";
 import { getCurrentUserId, subscribeCurrentUser } from "./lib/current-user";
 import { chatPath, navigate, replaceUrl } from "./lib/router";
 import EconomicCriticPanel from "./components/EconomicCriticPanel";
+import GenerationMilestoneStepper from "./components/GenerationMilestoneStepper";
 import LaunchOnFlapPanel from "./components/LaunchOnFlapPanel";
 import VaultCustomUI from "./components/VaultCustomUI";
 import { downloadVaultUiPackage, parseVaultUiArtifact } from "./lib/vault-ui-bridge";
@@ -49,6 +50,12 @@ import { Badge } from "./components/ui/badge";
 import { cn } from "./lib/utils";
 import { useI18n } from "./lib/i18n/context";
 import type { Dictionary } from "./lib/i18n/types";
+import {
+  advanceMilestone,
+  MILESTONE_ORDER,
+  milestoneForEvent,
+  type MilestoneId,
+} from "./lib/generation-milestones";
 
 type ConsentPrompt = {
   message: string;
@@ -149,7 +156,8 @@ export default function ChatPage({ chatId }: Props) {
 
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
-  const [progressLog, setProgressLog] = useState<string[]>([]);
+  const [activeMilestone, setActiveMilestone] = useState<MilestoneId | null>(null);
+  const [milestonesComplete, setMilestonesComplete] = useState(false);
   const [liveCode, setLiveCode] = useState("");
   const [result, setResult] = useState<CodegenResult | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
@@ -167,6 +175,11 @@ export default function ChatPage({ chatId }: Props) {
 
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  const milestoneSteps = useMemo(
+    () => MILESTONE_ORDER.map((id) => ({ id, label: dict.chatPage.milestones[id] })),
+    [dict]
+  );
   const codeRef = useRef<HTMLPreElement>(null);
 
   const streaming = activeRunId !== null && result === null && runError === null && consent === null;
@@ -192,7 +205,8 @@ export default function ChatPage({ chatId }: Props) {
 
       setActiveRunId(runId);
       setProgress(dict.chatPage.progress.connecting);
-      setProgressLog([]);
+      setActiveMilestone(null);
+      setMilestonesComplete(false);
       setLiveCode("");
       setResult(null);
       setRunError(null);
@@ -214,6 +228,8 @@ export default function ChatPage({ chatId }: Props) {
               }
             }
             setProgress(null);
+            setMilestonesComplete(true);
+            setActiveMilestone("finalize");
             // Keep the consent prompt visible: consent_required runs finish with
             // run_completed right after emitting the choice options.
             void refreshMessages();
@@ -235,13 +251,10 @@ export default function ChatPage({ chatId }: Props) {
             break;
           }
           default: {
+            const ms = milestoneForEvent(ev);
+            if (ms) setActiveMilestone((prev) => advanceMilestone(prev, ms));
             const line = progressLineFor(ev, dict.chatPage.progress);
-            if (line) {
-              setProgress(line);
-              setProgressLog((log) =>
-                log[log.length - 1] === line ? log : [...log.slice(-11), line]
-              );
-            }
+            if (line) setProgress(line);
           }
         }
       };
@@ -498,7 +511,7 @@ export default function ChatPage({ chatId }: Props) {
                   {isPlaceholder && streaming ? (
                     <span className="inline-flex items-center gap-2 text-muted-foreground">
                       <Loader2 className="size-3 animate-spin" />
-                      {progress ?? "Working…"}
+                      {activeMilestone ? dict.chatPage.milestones[activeMilestone] : (progress ?? dict.hero.generating)}
                     </span>
                   ) : (
                     m.content || (isPlaceholder ? "…" : "")
@@ -507,19 +520,15 @@ export default function ChatPage({ chatId }: Props) {
               );
             })}
 
-            {streaming && progressLog.length > 0 && (
-              <div className="rounded-md border border-border/60 bg-background/50 px-3 py-2">
-                {progressLog.map((line, i) => (
-                  <p
-                    key={`${i}-${line}`}
-                    className={cn(
-                      "text-[0.65rem] leading-5",
-                      i === progressLog.length - 1 ? "text-foreground" : "text-muted-foreground"
-                    )}
-                  >
-                    {line}
-                  </p>
-                ))}
+            {streaming && (
+              <div className="rounded-md border border-border/60 bg-background/50 px-3 py-3">
+                <GenerationMilestoneStepper
+                  steps={milestoneSteps}
+                  activeId={activeMilestone}
+                  allComplete={milestonesComplete}
+                  detail={progress}
+                  orientation="vertical"
+                />
               </div>
             )}
 
@@ -829,8 +838,20 @@ export default function ChatPage({ chatId }: Props) {
                 </div>
               </>
             ) : (
-              <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
-                {streaming ? (progress ?? "Waiting for the pipeline…") : "No generated code in this chat yet."}
+              <div className="flex flex-1 flex-col items-center justify-center gap-6 px-6 py-8">
+                {streaming ? (
+                  <div className="w-full max-w-md">
+                    <GenerationMilestoneStepper
+                      steps={milestoneSteps}
+                      activeId={activeMilestone}
+                      allComplete={milestonesComplete}
+                      detail={progress}
+                      orientation="horizontal"
+                    />
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">No generated code in this chat yet.</p>
+                )}
               </div>
             )}
           </CardContent>

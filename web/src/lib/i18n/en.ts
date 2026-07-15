@@ -141,6 +141,15 @@ export const en: Dictionary = {
       finalizing: "Finalizing…",
       contractName: "Contract: {name}",
     },
+    milestones: {
+      plan: "Plan",
+      code: "Code",
+      build: "Build",
+      test: "Test",
+      review: "Review",
+      ui: "UI",
+      finalize: "Done",
+    },
   },
 
   chatsLandingPage: {
