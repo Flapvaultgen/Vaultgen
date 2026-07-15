@@ -228,6 +228,43 @@ export function usageFromAnthropic(usage: {
   };
 }
 
+// ── Transient-error retry ─────────────────────────────────────────────────────
+
+/** Anthropic error "type" values worth retrying — all are provider-side capacity/hiccups, never our fault. */
+const RETRYABLE_ERROR_TYPES = new Set(["overloaded_error", "api_error", "internal_server_error", "rate_limit_error"]);
+const RETRYABLE_HTTP_STATUS = new Set([429, 500, 502, 503, 504, 529]);
+const MAX_TRANSIENT_RETRIES = 4;
+const RETRY_BACKOFF_MS = [2_000, 5_000, 12_000, 25_000];
+
+function anthropicErrorType(err: unknown): string | undefined {
+  const e = err as { error?: { type?: string; error?: { type?: string } }; type?: string } | null;
+  return e?.error?.error?.type ?? e?.error?.type ?? (typeof e?.type === "string" ? e.type : undefined);
+}
+
+function anthropicHttpStatus(err: unknown): number | undefined {
+  return (err as { status?: number } | null)?.status;
+}
+
+/** True for capacity/rate-limit/5xx errors that are safe to retry with backoff. */
+function isRetryableAnthropicError(err: unknown): boolean {
+  const type = anthropicErrorType(err);
+  const status = anthropicHttpStatus(err);
+  return (type ? RETRYABLE_ERROR_TYPES.has(type) : false) || (status ? RETRYABLE_HTTP_STATUS.has(status) : false);
+}
+
+/** Friendly, provider-neutral message — call sites (and the chat UI) show this instead of a raw SDK dump. */
+export function describeAiError(err: unknown): string {
+  const type = anthropicErrorType(err);
+  if (type === "overloaded_error") return "Anthropic's API is temporarily overloaded — please retry in a moment.";
+  if (type === "rate_limit_error") return "Rate limited by the AI provider — please wait a moment and retry.";
+  if (type === "api_error" || type === "internal_server_error") return "The AI provider had a temporary error — please retry.";
+  return err instanceof Error ? err.message : "Codegen failed";
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // ── Client factory ────────────────────────────────────────────────────────────
 
 export function createAiClient(apiKey: string): AiChatClient {
@@ -247,7 +284,11 @@ export function createAiClient(apiKey: string): AiChatClient {
     return { choices: [{ message: { content: text } }] };
   }
 
-  async function* streamChunks(params: AiCompletionParams): AsyncGenerator<AiCompletionChunk> {
+  /**
+   * One attempt at the full stream — split out so streamChunks can retry it.
+   * Throws on any error; the caller decides whether it is safe to retry.
+   */
+  async function* attemptStream(params: AiCompletionParams): AsyncGenerator<AiCompletionChunk> {
     const req = buildAnthropicRequest(params);
     const stream = await anthropic.messages.create({ ...req, stream: true });
     const usage: AiCallUsage = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 };
@@ -270,6 +311,36 @@ export function createAiClient(apiKey: string): AiChatClient {
       }
     } finally {
       recordAiUsage(params.model, usage, totals);
+    }
+  }
+
+  /**
+   * Retries a transient provider error (overload, rate limit, 5xx) with
+   * backoff — but ONLY while zero content has been yielded yet. Once the
+   * model has started streaming text, a silent retry would duplicate or
+   * corrupt the partial output the caller has already emitted downstream
+   * (e.g. streamed code_delta events to the chat UI), so a mid-stream error
+   * always propagates as-is.
+   */
+  async function* streamChunks(params: AiCompletionParams): AsyncGenerator<AiCompletionChunk> {
+    let attempt = 0;
+    for (;;) {
+      let yieldedAny = false;
+      try {
+        for await (const chunk of attemptStream(params)) {
+          yieldedAny = true;
+          yield chunk;
+        }
+        return;
+      } catch (err) {
+        if (yieldedAny || attempt >= MAX_TRANSIENT_RETRIES || !isRetryableAnthropicError(err)) throw err;
+        const waitMs = RETRY_BACKOFF_MS[attempt] ?? RETRY_BACKOFF_MS[RETRY_BACKOFF_MS.length - 1]!;
+        console.warn(
+          `[ai-client] transient error (${anthropicErrorType(err) ?? "unknown"}), retrying in ${waitMs}ms (attempt ${attempt + 1}/${MAX_TRANSIENT_RETRIES})`
+        );
+        await sleep(waitMs);
+        attempt++;
+      }
     }
   }
 

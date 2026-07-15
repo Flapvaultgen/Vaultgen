@@ -47,6 +47,7 @@ import {
 import { resolveCheapModel, resolveEscalationModel } from "./ai-model.js";
 import { generateVaultUi, type VaultUiArtifact } from "./ui-gen.js";
 import {
+  describeAiError,
   extractJsonPayload,
   createAiUsageTotals,
   runWithAiUsage,
@@ -3111,7 +3112,7 @@ export async function generateVaultCodeStream(
     emit({ type: "result", result: full });
   } catch (err) {
     console.error("codegen stream failed:", err);
-    emit({ type: "error", error: err instanceof Error ? err.message : "Codegen failed" });
+    emit({ type: "error", error: describeAiError(err) });
   }
 }
 
@@ -3167,7 +3168,7 @@ export async function generateVaultCodeRefineStream(
     emit({ type: "result", result: full });
   } catch (err) {
     console.error("codegen refine stream failed:", err);
-    emit({ type: "error", error: err instanceof Error ? err.message : "Refine failed" });
+    emit({ type: "error", error: describeAiError(err) });
   }
 }
 

@@ -155,14 +155,26 @@ export class RunManager {
 
     let result: CodegenResult | null = null;
     let streamError: string | null = null;
+    // Populated by the "error" codegen event — the pipeline's top-level catch
+    // swallows the exception and emits this instead of throwing, so this is
+    // the only way to recover the real reason (e.g. "Anthropic overloaded")
+    // rather than falling back to a generic message.
+    let codegenError: string | null = null;
 
     try {
       await this.generator(
         run.prompt,
         (ev) => {
-          void this.handleCodegenEvent(run, ev, (r) => {
-            result = r;
-          });
+          void this.handleCodegenEvent(
+            run,
+            ev,
+            (r) => {
+              result = r;
+            },
+            (msg) => {
+              codegenError = msg;
+            }
+          );
         },
         run.approximationConsent
       );
@@ -173,14 +185,15 @@ export class RunManager {
     if (result) {
       await this.finishWithResult(run, result);
     } else {
-      await this.finishWithError(run, streamError ?? "Generation produced no result.");
+      await this.finishWithError(run, streamError ?? codegenError ?? "Generation produced no result.");
     }
   }
 
   private async handleCodegenEvent(
     run: RegisteredRun,
     ev: CodegenEvent,
-    onResult: (r: CodegenResult) => void
+    onResult: (r: CodegenResult) => void,
+    onError: (message: string) => void
   ): Promise<void> {
     switch (ev.type) {
       case "status": {
@@ -252,6 +265,7 @@ export class RunManager {
         onResult(ev.result);
         break;
       case "error":
+        onError(ev.error);
         await this.event(run, "status", ev.error, { error: true });
         break;
     }
