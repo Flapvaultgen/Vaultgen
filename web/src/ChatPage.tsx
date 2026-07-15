@@ -189,13 +189,43 @@ export default function ChatPage({ chatId }: Props) {
     return userMessages.length > 0 ? userMessages[userMessages.length - 1]!.content : "";
   }, [messages]);
 
+  // A dropped session (expired token, brief network blip) must never leave
+  // the chat bubble stuck on its "…" placeholder forever — retry a few times
+  // with backoff before giving up (the optimistic local patch below is the
+  // real fallback if every attempt still fails).
   const refreshMessages = useCallback(async () => {
-    try {
-      setMessages(await getChatMessages(chatId));
-    } catch {
-      /* transient */
+    const delays = [0, 800, 2500];
+    for (const delay of delays) {
+      if (delay) await new Promise((r) => setTimeout(r, delay));
+      try {
+        setMessages(await getChatMessages(chatId));
+        return;
+      } catch {
+        /* try again, or give up silently after the last attempt */
+      }
     }
   }, [chatId]);
+
+  /** Immediately reflect a finished run in the placeholder bubble, without
+   * waiting on a server refetch that may be delayed or fail. */
+  const patchLastAssistantMessage = useCallback(
+    (update: Partial<Pick<ChatMessage, "content" | "status">>) => {
+      setMessages((prev) => {
+        let idx = -1;
+        for (let i = prev.length - 1; i >= 0; i--) {
+          if (prev[i]!.role === "assistant") {
+            idx = i;
+            break;
+          }
+        }
+        if (idx === -1) return prev;
+        const next = [...prev];
+        next[idx] = { ...next[idx]!, ...update };
+        return next;
+      });
+    },
+    []
+  );
 
   const connectToRun = useCallback(
     (runId: string) => {
@@ -226,23 +256,32 @@ export default function ChatPage({ chatId }: Props) {
               if (r.contractName && isUsableCreationBytecode(r.creationBytecode)) {
                 saveVaultBytecode(r.contractName, r.creationBytecode!);
               }
+              patchLastAssistantMessage({
+                status: "completed",
+                content: r.explanation || `Generated ${r.contractName ?? "the vault"}.sol.`,
+              });
             }
             setProgress(null);
             setMilestonesComplete(true);
             setActiveMilestone("finalize");
             // Keep the consent prompt visible: consent_required runs finish with
-            // run_completed right after emitting the choice options.
+            // run_completed right after emitting the choice options. The patch
+            // above already shows the real content; this reconciles with the
+            // server copy when it succeeds (never leaves the bubble stuck).
             void refreshMessages();
             void getChatArtifacts(chatId)
               .then(setArtifacts)
               .catch(() => undefined);
             break;
           }
-          case "run_failed":
-            setRunError(ev.message ?? "Generation failed.");
+          case "run_failed": {
+            const message = ev.message ?? "Generation failed.";
+            setRunError(message);
             setProgress(null);
+            patchLastAssistantMessage({ status: "failed", content: message });
             void refreshMessages();
             break;
+          }
           case "consent_required":
           case "design_questions": {
             const options = (ev.payload?.options ?? []) as ConsentPrompt["options"];
@@ -270,7 +309,7 @@ export default function ChatPage({ chatId }: Props) {
           if (!controller.signal.aborted) setProgress(null);
         });
     },
-    [chatId, refreshMessages, dict]
+    [chatId, refreshMessages, dict, patchLastAssistantMessage]
   );
 
   // Initial load: chat, messages, sidebar, storage mode, artifacts, active run.
