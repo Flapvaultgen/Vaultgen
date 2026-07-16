@@ -17,6 +17,11 @@ WORKDIR /app
 COPY foundry.toml foundry.lock remappings.txt ./
 COPY lib ./lib
 COPY src ./src
+# test/ is required at runtime, not just for `forge test` in CI: the codegen pipeline writes
+# each generated vault's fork test into test/_codegen/ and runs it against test/FlapBSCFixture.sol.
+# Without this, every generation's integration-test step fails identically (missing import),
+# and the pipeline burns its whole attempt budget rewriting a contract that was never the problem.
+COPY test ./test
 
 # API server
 COPY server/package.json server/package-lock.json ./server/

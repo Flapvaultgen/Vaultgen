@@ -29,7 +29,8 @@ const CODEGEN_DIR = path.join(REPO_ROOT, "src", "_codegen");
 // ── forge compile gate ──────────────────────────────────────────────────────
 export async function compile(
   contractName: string,
-  body: string
+  body: string,
+  opts?: { viaIr?: boolean }
 ): Promise<{ ok: boolean; errors: string; artifactPath: string; filePath: string }> {
   // Clear any prior generated file so stale/broken attempts never pollute `forge build`/`forge test`.
   await rm(CODEGEN_DIR, { recursive: true, force: true });
@@ -40,10 +41,18 @@ export async function compile(
   await writeFile(filePath, source, "utf8");
 
   const artifactPath = path.join(REPO_ROOT, "out", fileName, `${contractName}.json`);
+  // Once a run has learned this contract needs --via-ir to fit under EIP-170, every later
+  // pass compiles with the same flags up front instead of re-trying the (known-losing)
+  // default profile first. That keeps solc settings stable across the whole run so forge's
+  // build cache for the shared libraries (OpenZeppelin, forge-std) is reused instead of being
+  // invalidated and fully rebuilt on every single pass — the previous flip-flopping between
+  // default and --via-ir settings on every pass was slow enough to contribute to long-running
+  // generations exhausting the container before converging.
+  const viaIrFlags = opts?.viaIr ? ` --via-ir --optimizer-runs 200` : "";
 
   try {
     // Build only the generated file's tree; the rest of the repo is cached.
-    const { stdout } = await execAsync(`"${FORGE}" build "${filePath}" 2>&1`, {
+    const { stdout } = await execAsync(`"${FORGE}" build "${filePath}"${viaIrFlags} 2>&1`, {
       cwd: REPO_ROOT,
       timeout: 120_000,
       maxBuffer: 1024 * 1024 * 16,
@@ -133,7 +142,11 @@ export async function tryViaIRRescue(
 } | null> {
   if (!filePath || !artifactPath) return null;
   try {
-    await execAsync(`"${FORGE}" build "${filePath}" --via-ir --optimizer-runs 200 --force 2>&1`, {
+    // No --force: the --via-ir/--optimizer-runs flags already change the settings hash, so
+    // forge's own cache correctly detects the mismatch and recompiles what's needed. Forcing
+    // a full rebuild here was wiping out the (valid, reusable) cached library artifacts on
+    // every single rescue, which is the dominant cost on a long, many-pass generation.
+    await execAsync(`"${FORGE}" build "${filePath}" --via-ir --optimizer-runs 200 2>&1`, {
       cwd: REPO_ROOT,
       timeout: 240_000,
       maxBuffer: 1024 * 1024 * 16,

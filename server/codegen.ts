@@ -2242,6 +2242,16 @@ async function runCodegenPipeline(opts: {
   let artifactPath = "";
   let filePath = "";
   let attempts = 0;
+  // Sticky once true: avoids re-trying (and re-failing) the default solc profile every pass
+  // once we know this contract only fits under EIP-170 with --via-ir. See compile()/
+  // tryViaIRRescue() in codegen-compile.ts for why this also prevents build-cache thrashing.
+  let needsViaIr = false;
+  // Counts consecutive passes where the AI-written test file (plus its deterministic
+  // fallback) both failed to even compile/run — as opposed to compiling fine and finding a
+  // real bug in the vault. Two in a row without a single real test execution in between is a
+  // sign of an environment/tooling problem (bad solc cache, disk pressure, etc.), not something
+  // rewriting the contract can fix — so we stop burning the remaining passes on it.
+  let consecutiveTestGenFailures = 0;
   let integrationTestPath: string | null = null;
   let integrationTestsPassed = false;
   let simulationReport: SimulationReport | null = null;
@@ -2295,7 +2305,7 @@ async function runCodegenPipeline(opts: {
     return createHash("sha256").update(`${contractName}|${signatures.join(";")}`).digest("hex");
   };
 
-  const runIntegrationGate = async (): Promise<{ passed: boolean; errors: string }> => {
+  const runIntegrationGate = async (): Promise<{ passed: boolean; errors: string; generationFailed?: boolean }> => {
     const interfaceHash = currentInterfaceHash();
     if (reusableTest && reusableTest.interfaceHash === interfaceHash && creationBytecode) {
       status("generating_tests", "Interface unchanged — reusing the existing journey tests…");
@@ -2317,21 +2327,33 @@ async function runCodegenPipeline(opts: {
     }
     if (!reusableTest || reusableTest.interfaceHash !== interfaceHash || integrationTestPath === null) {
       status("generating_tests", "Writing MechanicSpec journey tests (Rule 006)…");
-      const tr = await generateIntegrationTest(contractName, artifactPath, fullSource, apiKey, model, mechanicSpec);
+      const tr = await generateIntegrationTest(
+        contractName,
+        artifactPath,
+        fullSource,
+        apiKey,
+        model,
+        mechanicSpec,
+        needsViaIr
+      );
       testJourneys = tr.journeys;
       if (!tr.ok) {
         reusableTest = null;
-        pushFix({ phase: "generating_tests", attempt: attempts, message: tr.errors.slice(0, 200) });
-        return { passed: false, errors: `Integration test generation failed:\n${tr.errors}` };
+        consecutiveTestGenFailures += 1;
+        // Keep enough of the raw forge/solc output that a real compile error isn't cut off
+        // by Foundry's benign "Failed to get git revision for dependency" preamble noise.
+        pushFix({ phase: "generating_tests", attempt: attempts, message: tr.errors.slice(0, 800) });
+        return { passed: false, generationFailed: true, errors: `Integration test generation failed:\n${tr.errors}` };
       }
       integrationTestPath = tr.path;
       reusableTest = { interfaceHash, path: tr.path, journeys: tr.journeys };
       pushFix({ phase: "generating_tests", attempt: attempts, message: tr.path });
     }
+    consecutiveTestGenFailures = 0;
 
     const suitePath = integrationTestPath ?? "";
     status("generating_tests", "Running Foundry fork simulation…");
-    const testRun = await runIntegrationTests(contractName, suitePath);
+    const testRun = await runIntegrationTests(contractName, suitePath, needsViaIr);
     integrationTestsPassed = testRun.ok || testRun.skipped === true;
     simulationReport = buildSimulationReport(contractName, suitePath, testRun.output, testJourneys, testRun);
     emit?.({ type: "simulation_report", report: simulationReport });
@@ -2341,7 +2363,7 @@ async function runCodegenPipeline(opts: {
         phase: "test_fix",
         attempt: attempts,
         rule: "integration-test-failure",
-        message: testRun.errors.slice(0, 200),
+        message: testRun.errors.slice(0, 800),
       });
       return { passed: false, errors: testRun.errors };
     }
@@ -2406,7 +2428,7 @@ async function runCodegenPipeline(opts: {
     code = applyCommonCodegenPatches(code);
 
     status("compiling");
-    const res = await compile(contractName, code);
+    const res = await compile(contractName, code, { viaIr: needsViaIr });
     ok = res.ok;
     compileErrors = res.errors;
     artifactPath = res.artifactPath;
@@ -2473,6 +2495,7 @@ async function runCodegenPipeline(opts: {
       const rescued = await tryViaIRRescue(filePath, artifactPath);
       if (rescued) {
         ({ abi, creationBytecode, bytecodeSize, deployedBytecodeSize } = rescued);
+        needsViaIr = true;
         pushFix({
           phase: "safety_fix",
           attempt: attempts,
@@ -2496,7 +2519,10 @@ async function runCodegenPipeline(opts: {
     const gate = await runIntegrationGate();
     if (!gate.passed) {
       status("test_fix", "integration-test-failure");
-      if (/fs_permissions|not allowed to be accessed for read operations/i.test(gate.errors)) {
+      if (
+        /fs_permissions|not allowed to be accessed for read operations/i.test(gate.errors) ||
+        (gate.generationFailed && consecutiveTestGenFailures >= 2)
+      ) {
         pushFix({
           phase: "test_fix",
           attempt: attempts,
@@ -2571,7 +2597,7 @@ async function runCodegenPipeline(opts: {
     code = applyCommonCodegenPatches(code);
 
     status("compiling");
-    const res = await compile(contractName, code);
+    const res = await compile(contractName, code, { viaIr: needsViaIr });
     ok = res.ok;
     compileErrors = res.errors;
     artifactPath = res.artifactPath;
@@ -2622,6 +2648,7 @@ async function runCodegenPipeline(opts: {
       const rescued2 = await tryViaIRRescue(filePath, artifactPath);
       if (rescued2) {
         ({ abi, creationBytecode, bytecodeSize, deployedBytecodeSize } = rescued2);
+        needsViaIr = true;
         pushFix({
           phase: "safety_fix",
           attempt: attempts,
@@ -2645,6 +2672,18 @@ async function runCodegenPipeline(opts: {
     const gate = await runIntegrationGate();
     if (!gate.passed) {
       lastTestErrors = gate.errors;
+      // Same infra circuit-breaker as the main loop: if the test file itself won't even
+      // compile/run for two rewrites in a row, more rewrites won't fix it — stop here with
+      // whatever is left rather than burning the rest of the pass budget on a dead end.
+      if (gate.generationFailed && consecutiveTestGenFailures >= 2) {
+        pushFix({
+          phase: "test_fix",
+          attempt: attempts,
+          rule: "integration-test-infra",
+          message: gate.errors.slice(0, 300),
+        });
+        break;
+      }
       messages.push({ role: "assistant", content: lastAssistant });
       pendingFix = stream
         ? testFixPromptStream(gate.errors, attempts, [...previousFailures], mechanicSpec, failingScenarios())
@@ -2795,7 +2834,7 @@ async function runCodegenPipeline(opts: {
       };
 
       status("compiling");
-      const res = await compile(contractName, code);
+      const res = await compile(contractName, code, { viaIr: needsViaIr });
       if (!res.ok) {
         attemptRecord.remainingIssues = ["repair attempt did not compile — rolled back to previous good code"];
         repairAttempts.push(attemptRecord);
@@ -2836,6 +2875,7 @@ async function runCodegenPipeline(opts: {
         const rescued3 = await tryViaIRRescue(filePath, artifactPath);
         if (rescued3) {
           ({ abi, creationBytecode, bytecodeSize, deployedBytecodeSize } = rescued3);
+          needsViaIr = true;
           pushFix({
             phase: "critic_repair",
             attempt: attempts,

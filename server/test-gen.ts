@@ -802,9 +802,10 @@ ${journeyTests}
 
 // ── Compile + fork run ───────────────────────────────────────────────────────
 
-async function compileTest(testPath: string): Promise<{ ok: boolean; errors: string }> {
+async function compileTest(testPath: string, viaIr = false): Promise<{ ok: boolean; errors: string }> {
+  const viaIrFlags = viaIr ? ` --via-ir --optimizer-runs 200` : "";
   try {
-    await execAsync(`"${FORGE}" build "${testPath}" 2>&1`, {
+    await execAsync(`"${FORGE}" build "${testPath}"${viaIrFlags} 2>&1`, {
       cwd: REPO_ROOT,
       timeout: 120_000,
       maxBuffer: 1024 * 1024 * 8,
@@ -819,7 +820,8 @@ async function compileTest(testPath: string): Promise<{ ok: boolean; errors: str
 /** Run Foundry tests for a generated integration test file. */
 export async function runIntegrationTests(
   contractName: string,
-  testRelPath: string
+  testRelPath: string,
+  viaIr = false
 ): Promise<{ ok: boolean; errors: string; skipped?: boolean; output: string }> {
   if (process.env.SKIP_FORK_TESTS === "1") {
     return { ok: true, errors: "", skipped: true, output: "" };
@@ -827,10 +829,14 @@ export async function runIntegrationTests(
 
   const matchPath = testRelPath.replace(/\\/g, "/");
   const forkUrl = DEFAULT_FORK_URL;
+  // Match whatever solc settings the vault contract itself was last compiled with (see
+  // codegen-compile.ts) so this doesn't force forge to recompile the shared OpenZeppelin/
+  // forge-std artifacts under a different profile on every single pass.
+  const viaIrFlags = viaIr ? ` --via-ir --optimizer-runs 200` : "";
 
   try {
     const { stdout, stderr } = await execAsync(
-      `"${FORGE}" test --match-path "${matchPath}" --fork-url "${forkUrl}" -vvv 2>&1`,
+      `"${FORGE}" test --match-path "${matchPath}" --fork-url "${forkUrl}"${viaIrFlags} -vvv 2>&1`,
       {
         cwd: REPO_ROOT,
         timeout: 180_000,
@@ -984,7 +990,8 @@ export async function generateIntegrationTest(
   vaultSource: string,
   apiKey: string | undefined,
   model: string,
-  mechanicSpec?: MechanicSpec
+  mechanicSpec?: MechanicSpec,
+  viaIr = false
 ): Promise<{ ok: boolean; path: string; errors: string; journeys: TestJourney[] }> {
   const journeys = synthesizeTestJourneys(mechanicSpec, vaultSource, contractName);
   const creationHex = await readCreationBytecode(artifactPath);
@@ -1036,11 +1043,11 @@ ${vaultSource.slice(0, 50000)}`,
   }
 
   await writeFile(testPath, source, "utf8");
-  const compiled = await compileTest(testPath);
+  const compiled = await compileTest(testPath, viaIr);
   if (!compiled.ok) {
     source = fallbackTestSource(contractName, writeMethods, journeys);
     await writeFile(testPath, source, "utf8");
-    const retry = await compileTest(testPath);
+    const retry = await compileTest(testPath, viaIr);
     return {
       ok: retry.ok,
       path: retry.ok ? `test/_codegen/${contractName}.mainnet.t.sol` : "",
