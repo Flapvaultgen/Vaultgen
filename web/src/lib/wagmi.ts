@@ -1,7 +1,26 @@
 import { http, createConfig } from "wagmi";
 import { bsc, bscTestnet } from "wagmi/chains";
 import { injected } from "wagmi/connectors";
-import type { EIP1193Provider } from "viem";
+import { defineChain, type EIP1193Provider } from "viem";
+
+/**
+ * Robinhood Chain — an Arbitrum-Orbit L2 where Flap is also deployed
+ * (VaultPortal 0xe9F7…8197B, Guardian 0x0000…70000 — see VaultBase.sol /
+ * VaultFactoryBaseV2.sol). Not in viem/wagmi's built-in chain list yet, so
+ * it's defined here. Gas token is ETH, not BNB. There is currently no
+ * published Robinhood testnet Flap deployment, so only mainnet is wired.
+ */
+export const robinhood = defineChain({
+  id: 4663,
+  name: "Robinhood Chain",
+  nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+  rpcUrls: {
+    default: { http: ["https://rpc.mainnet.chain.robinhood.com"] },
+  },
+  blockExplorers: {
+    default: { name: "Blockscout", url: "https://robinhoodchain.blockscout.com" },
+  },
+});
 
 type EthereumProvider = EIP1193Provider & Record<string, unknown>;
 

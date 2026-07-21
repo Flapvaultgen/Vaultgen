@@ -140,7 +140,7 @@ forge test --fork-url <BSC_RPC_URL>    # includes mainnet-fork integration tests
 |-------|--------|
 | BSC Testnet (97) | ✅ Fully supported — default for testnet launches |
 | BSC Mainnet (56) | ✅ Supported |
-| Robinhood Chain (4663) | 🔜 Flap is live there — multi-chain support is the next planned feature |
+| Robinhood Chain (4663) | ⚙️ Contract-layer support added (Portal/VaultPortal/Guardian addresses wired into the vault base contracts) — the app's launch UI still targets BSC testnet only. Note: Flap has no Robinhood testnet, so a real Robinhood launch would use mainnet ETH directly. |
 
 ---
 
