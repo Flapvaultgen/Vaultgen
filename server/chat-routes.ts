@@ -6,7 +6,14 @@
  * so local dev never crashes. GET /api/chat-config reports which mode is live.
  */
 import { Router, type Request, type Response } from "express";
-import { generateVaultCodeStream, type ApproximationConsent, type CodegenEvent } from "./codegen.js";
+import {
+  generateVaultCodeStream,
+  generateVaultCodeRefineStream,
+  type ApproximationConsent,
+  type CodegenEvent,
+  type RefineChatTurn,
+  type RefineSession,
+} from "./codegen.js";
 import { resolveAiModel } from "./ai-model.js";
 import { getChatStore } from "./chat-store.js";
 import { isSupabaseConfigured } from "./supabase.js";
@@ -57,14 +64,117 @@ function sendForbidden(res: Response): void {
   sendError(res, 403, "This chat belongs to a different wallet.");
 }
 
-/** Model routing stays in ai-model.ts — never hardcoded here. */
-const defaultGenerator = (
-  prompt: string,
-  emit: (ev: CodegenEvent) => void,
-  approximationConsent?: ApproximationConsent
-) => generateVaultCodeStream(prompt, process.env.ANTHROPIC_API_KEY, resolveAiModel(), emit, approximationConsent);
+/**
+ * Chats are multi-turn, but the codegen pipeline itself is one-shot: every
+ * call to generateVaultCodeStream() starts a brand-new mechanic from just the
+ * text it's given. Without this, a short follow-up like "continue" or "add a
+ * cap" gets sent as the ENTIRE prompt for a fresh, context-free generation —
+ * the model has no idea a vault was already discussed, so it invents
+ * something new from that one word (hence contracts literally named after a
+ * follow-up message like "Continue").
+ *
+ * This picks the right codegen entry point per message:
+ *  - First message in a chat, or a design-question/consent choice (resends
+ *    the ORIGINAL idea verbatim with approximationConsent set) → plain
+ *    generateVaultCodeStream, unchanged.
+ *  - Follow-up in a chat whose last completed run produced real Solidity →
+ *    generateVaultCodeRefineStream, seeded with the prior source + full
+ *    chat history, so the model edits the existing contract instead of
+ *    starting over.
+ *  - Follow-up in a chat whose last completed run stopped at a spec/consent
+ *    stage (no code yet, e.g. "draft spec only") → generateVaultCodeStream
+ *    again, but with the original idea + that spec context folded into the
+ *    prompt so the model actually writes the agreed-on contract instead of
+ *    treating the follow-up as a brand-new idea.
+ *
+ * Split out as a factory (rather than calling generateVaultCodeStream /
+ * generateVaultCodeRefineStream directly) so the branch-selection logic can
+ * be unit-tested with stub generators, without needing a real API key or an
+ * HTTP/SSE round-trip.
+ */
+export function makeContinuationAwareGenerator(deps?: {
+  freshGenerate?: typeof generateVaultCodeStream;
+  refineGenerate?: typeof generateVaultCodeRefineStream;
+}) {
+  const freshGenerate = deps?.freshGenerate ?? generateVaultCodeStream;
+  const refineGenerate = deps?.refineGenerate ?? generateVaultCodeRefineStream;
 
-export const runManager = new RunManager(getChatStore, defaultGenerator);
+  return async function continuationAwareGenerator(
+    chatId: string,
+    prompt: string,
+    emit: (ev: CodegenEvent) => void,
+    approximationConsent?: ApproximationConsent
+  ): Promise<void> {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    const model = resolveAiModel();
+
+    // A design-question / consent choice resends the ORIGINAL idea verbatim
+    // alongside an explicit consent flag — always treat that as a fresh
+    // generation of that idea, never as a "refine the previous output" turn.
+    if (approximationConsent) {
+      await freshGenerate(prompt, apiKey, model, emit, approximationConsent);
+      return;
+    }
+
+    const store = getChatStore();
+    const [messages, runs] = await Promise.all([
+      store.listMessages(chatId).catch(() => []),
+      store.listRuns(chatId).catch(() => []),
+    ]);
+
+    // The prior turns only — the current user message (this `prompt`) was
+    // already persisted before the run was registered, so it's the last one.
+    const priorMessages = messages.slice(0, -1);
+    const firstUserMessage = messages.find((m) => m.role === "user")?.content?.trim() || prompt;
+
+    const completedRuns = runs
+      .filter((r) => r.status === "completed")
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const lastCompletedRun = completedRuns[completedRuns.length - 1];
+
+    // No prior completed run in this chat at all → this really is the first
+    // generation, even if the chat row was pre-created.
+    if (!lastCompletedRun) {
+      await freshGenerate(prompt, apiKey, model, emit, approximationConsent);
+      return;
+    }
+
+    if (lastCompletedRun.deliverable === "contract") {
+      const artifacts = await store.listArtifacts({ runId: lastCompletedRun.id }).catch(() => []);
+      const solidity = artifacts.find((a) => a.artifactType === "solidity");
+      if (solidity) {
+        const contractName = solidity.name.replace(/\.sol$/i, "");
+        const chatHistory: RefineChatTurn[] = priorMessages
+          .filter((m) => (m.role === "user" || m.role === "assistant") && m.content.trim().length > 0)
+          .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+        const session: RefineSession = {
+          initialPrompt: firstUserMessage,
+          contractName,
+          source: solidity.content,
+          chatHistory,
+        };
+        await refineGenerate(prompt, session, apiKey, model, emit);
+        return;
+      }
+    }
+
+    // Last run stopped at a spec/consent/design-question stage — no code
+    // exists yet. Fold the original idea + what was already decided into the
+    // new prompt so the follow-up ("continue", "yes go ahead", …) reads as a
+    // continuation of that spec rather than an unrelated one-word idea.
+    const lastAssistantReply = [...priorMessages].reverse().find((m) => m.role === "assistant" && m.content.trim().length > 0);
+    const composedPrompt =
+      firstUserMessage === prompt
+        ? prompt
+        : `Original vault idea:\n${firstUserMessage}\n\n${
+            lastAssistantReply ? `What we already agreed on:\n${lastAssistantReply.content.trim()}\n\n` : ""
+          }The user's next message: "${prompt}"\n\nContinue from there and produce the actual Solidity contract now.`;
+
+    await freshGenerate(composedPrompt, apiKey, model, emit, approximationConsent);
+  };
+}
+
+export const runManager = new RunManager(getChatStore, makeContinuationAwareGenerator());
 
 const HEARTBEAT_MS = 15_000;
 

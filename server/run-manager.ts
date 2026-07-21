@@ -20,6 +20,7 @@ export type RunStreamEvent = {
 };
 
 export type PipelineGenerator = (
+  chatId: string,
   prompt: string,
   emit: (ev: CodegenEvent) => void,
   approximationConsent?: ApproximationConsent
@@ -163,6 +164,7 @@ export class RunManager {
 
     try {
       await this.generator(
+        run.chatId,
         run.prompt,
         (ev) => {
           void this.handleCodegenEvent(

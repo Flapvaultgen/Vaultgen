@@ -6,7 +6,7 @@
     "dev": "tsx watch index.ts",
     "build": "tsc --noEmit",
     "start": "tsx index.ts",
-    "test:scanners": "tsx scanner-selfcheck.mts && tsx mechanic-completeness-selfcheck.mts && tsx scanner-antiregression-selfcheck.mts && tsx constitution-selfcheck.mts && tsx mechanic-spec-selfcheck.mts && tsx codegen-prompt-selfcheck.mts && tsx test-gen-selfcheck.mts && tsx scope-selfcheck.mts && tsx economic-hardening-selfcheck.mts && tsx critic-repair-selfcheck.mts && tsx ai-model-selfcheck.mts && tsx ai-client-retry-selfcheck.mts && tsx chat-store-selfcheck.mts && tsx deployed-size-selfcheck.mts && tsx ai-cost-selfcheck.mts && tsx ui-gen-selfcheck.mts",
+    "test:scanners": "tsx scanner-selfcheck.mts && tsx mechanic-completeness-selfcheck.mts && tsx scanner-antiregression-selfcheck.mts && tsx constitution-selfcheck.mts && tsx mechanic-spec-selfcheck.mts && tsx codegen-prompt-selfcheck.mts && tsx test-gen-selfcheck.mts && tsx scope-selfcheck.mts && tsx economic-hardening-selfcheck.mts && tsx critic-repair-selfcheck.mts && tsx ai-model-selfcheck.mts && tsx ai-client-retry-selfcheck.mts && tsx chat-store-selfcheck.mts && tsx chat-continuation-selfcheck.mts && tsx deployed-size-selfcheck.mts && tsx ai-cost-selfcheck.mts && tsx ui-gen-selfcheck.mts",
     "test:ai-client-retry": "tsx ai-client-retry-selfcheck.mts",
     "test:ai-cost": "tsx ai-cost-selfcheck.mts",
     "test:ui-gen": "tsx ui-gen-selfcheck.mts",
@@ -20,7 +20,8 @@
     "test:economic-hardening": "tsx economic-hardening-selfcheck.mts",
     "test:critic-repair": "tsx critic-repair-selfcheck.mts",
     "test:ai-model": "tsx ai-model-selfcheck.mts",
-    "test:chat-store": "tsx chat-store-selfcheck.mts"
+    "test:chat-store": "tsx chat-store-selfcheck.mts",
+    "test:chat-continuation": "tsx chat-continuation-selfcheck.mts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",

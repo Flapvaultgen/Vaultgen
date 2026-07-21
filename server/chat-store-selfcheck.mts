@@ -222,7 +222,7 @@ function fakeResult(overrides: Partial<CodegenResult> = {}): CodegenResult {
   const asst2 = await memStore.createMessage({ chatId: chat2.id, role: "assistant", content: "", status: "pending" });
   const run2 = await memStore.createRun({ chatId: chat2.id, userMessageId: user2.id, assistantMessageId: asst2.id });
 
-  const generator = async (_prompt: string, emit: (ev: CodegenEvent) => void) => {
+  const generator = async (_chatId: string, _prompt: string, emit: (ev: CodegenEvent) => void) => {
     emit({ type: "status", phase: "classifying", attempt: 0 });
     emit({ type: "code_delta", delta: "contract " });
     emit({ type: "code_delta", delta: "FakeVault {}" });
