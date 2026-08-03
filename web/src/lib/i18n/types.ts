@@ -7,6 +7,7 @@ export interface Dictionary {
       tokens: string;
       chats: string;
       docs: string;
+      menuAria: string;
     };
     langToggleAria: string;
     backToStudio: string;
@@ -27,6 +28,8 @@ export interface Dictionary {
     headlineLine2: string;
     withWord: string;
     accentWord: string;
+    /** Dim continuation of the headline, set at the same size (two-tone headline). */
+    headlineDim: string;
     subtitle: string;
     walletNotice: string;
     placeholderConnected: string;
@@ -36,6 +39,8 @@ export interface Dictionary {
     generating: string;
     trustLine: string;
     examples: string[];
+    /** Three hairline-divided pillars closing the fold. */
+    pillars: { label: string; title: string; body: string }[];
   };
 
   tokensPage: {

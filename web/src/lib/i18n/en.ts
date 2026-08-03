@@ -12,6 +12,7 @@ export const en: Dictionary = {
       tokens: "Tokens",
       chats: "Chats",
       docs: "Docs",
+      menuAria: "Open navigation menu",
     },
     langToggleAria: "Switch language",
     backToStudio: "Back to studio",
@@ -33,6 +34,7 @@ export const en: Dictionary = {
     headlineLine2: "mechanic in plain words",
     withWord: "with ",
     accentWord: "Flap Vault Gen.",
+    headlineDim: "Flap Vault Gen plans it, writes the Solidity, tests it on a chain fork, and tells you if it can launch.",
     subtitle:
       "Plan → scope → Solidity → compile → safety scan → fork tests → advisory audit. No vault templates — any mechanic that fits Flap Rules 001–009.",
     walletNotice: "Connect your wallet to describe and generate a vault.",
@@ -49,6 +51,23 @@ export const en: Dictionary = {
       "Referral vault where users set a referrer and the manager settles referral rewards from tax BNB",
       "Epoch vault where tax BNB accumulates for 7 days, then the manager settles rewards pro-rata to registered participants",
       "Milestone vault that unlocks actions when treasury BNB crosses set thresholds",
+    ],
+    pillars: [
+      {
+        label: "Fig 0.1",
+        title: "No templates",
+        body: "Your mechanic is built from your own description, not picked from a menu of vault types.",
+      },
+      {
+        label: "Fig 0.2",
+        title: "Gated before launch",
+        body: "Compile, safety scanners, fork tests and a bytecode-size check all have to pass.",
+      },
+      {
+        label: "Fig 0.3",
+        title: "Reviewed, then yours",
+        body: "A Flap spec audit and an economic review are shown to you, then you deploy from here.",
+      },
     ],
   },
 

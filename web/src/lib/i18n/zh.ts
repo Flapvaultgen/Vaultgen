@@ -9,6 +9,7 @@ export const zh: Dictionary = {
       tokens: "代币",
       chats: "对话记录",
       docs: "文档",
+      menuAria: "打开导航菜单",
     },
     langToggleAria: "切换语言",
     backToStudio: "返回工作台",
@@ -30,6 +31,7 @@ export const zh: Dictionary = {
     headlineLine2: "你想要的金库机制",
     withWord: "— ",
     accentWord: "Flap Vault Gen",
+    headlineDim: "Flap Vault Gen 会规划机制、编写 Solidity、做分叉测试，并告诉你它能否上线。",
     subtitle:
       "规划 → 可行性判断 → 生成 Solidity → 编译 → 安全扫描 → 分叉测试 → 顾问式审计。没有固定模板 — 只要符合 Flap 001–009 号规则的机制都可以生成。",
     walletNotice: "请先连接钱包，才能描述并生成金库。",
@@ -46,6 +48,23 @@ export const zh: Dictionary = {
       "推荐金库：用户设置推荐人，管理员用交易税 BNB 结算推荐奖励",
       "周期金库：交易税 BNB 累积 7 天后，管理员按比例把奖励结算给已登记的参与者",
       "里程碑金库：当国库 BNB 达到设定门槛时解锁新操作",
+    ],
+    pillars: [
+      {
+        label: "图 0.1",
+        title: "没有模板",
+        body: "机制完全根据你自己的描述生成，而不是从固定的金库类型里挑选。",
+      },
+      {
+        label: "图 0.2",
+        title: "上线前先过关",
+        body: "编译、安全扫描、分叉测试和字节码大小检查都必须通过。",
+      },
+      {
+        label: "图 0.3",
+        title: "审阅后交给你",
+        body: "Flap 规则审计和经济性审阅结果会展示给你，然后你在这里直接部署。",
+      },
     ],
   },
 

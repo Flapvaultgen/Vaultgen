@@ -711,54 +711,100 @@ export default function CodegenStudio({ onChatActive, heroLayout = false }: Prop
       ? result
       : null;
 
+  /**
+   * One focused composer surface (Raycast-style): the input, its keyboard hint
+   * and the primary action live inside a single bordered card instead of three
+   * loose stacked controls, with the example ideas as hairline pills under it.
+   */
   const promptPanel = (
-    <div className={heroLayout ? "space-y-3 text-left" : "space-y-4"}>
+    <div className={heroLayout ? "space-y-3" : "space-y-4"}>
       {!walletConnected && (
-        <p className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-          <Wallet className="size-3.5 shrink-0" /> {dict.hero.walletNotice}
+        <p
+          className={
+            heroLayout
+              ? "mx-auto flex w-fit items-center gap-1.5 rounded-lg border border-border bg-secondary/40 px-3 py-2 text-xs text-muted-foreground"
+              : "inline-flex items-center gap-1.5 rounded-lg border border-border bg-secondary/40 px-3 py-2 text-xs text-muted-foreground"
+          }
+        >
+          <Wallet className="size-3.5 shrink-0 text-primary" /> {dict.hero.walletNotice}
         </p>
       )}
-      <Textarea
-        rows={heroLayout ? 3 : 5}
-        placeholder={walletConnected ? dict.hero.placeholderConnected : dict.hero.placeholderDisconnected}
-        value={prompt}
-        disabled={!walletConnected}
-        onChange={(e) => setPrompt(e.target.value)}
-        className={heroLayout ? "fgv-hero-textarea min-h-[96px] text-sm" : "min-h-[140px] resize-none text-sm"}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-            e.preventDefault();
-            void onGenerate();
-          }
-        }}
-      />
-      <div className="flex flex-wrap justify-center gap-2">
-        {dict.hero.examples.map((ex) => (
-          <button
-            key={ex}
-            type="button"
+      {heroLayout ? (
+        <div className="fgv-composer">
+          <Textarea
+            rows={5}
+            placeholder={walletConnected ? dict.hero.placeholderConnected : dict.hero.placeholderDisconnected}
+            value={prompt}
             disabled={!walletConnected}
-            onClick={() => setPrompt(ex)}
-            className="rounded-full border border-border/70 bg-card/60 px-3 py-1.5 text-left text-[0.68rem] text-muted-foreground transition-colors hover:border-primary/40 hover:bg-secondary hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-border/70 disabled:hover:bg-card/60"
-          >
-            {ex.length > 48 ? `${ex.slice(0, 48)}…` : ex}
+            onChange={(e) => setPrompt(e.target.value)}
+            /* Shorter on phones so the composer footer and example pills still
+               fit inside the non-scrolling fold. */
+            className="fgv-hero-textarea min-h-[150px] sm:min-h-[210px]"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                void onGenerate();
+              }
+            }}
+          />
+          <div className="flex items-center justify-between gap-3 border-t border-border px-4 py-3">
+            <span className="fgv-mono-label">
+              {prompt.trim().length > 0 ? `${prompt.trim().length} chars` : "Describe your mechanic"}
+            </span>
+            <div className="flex items-center gap-3">
+              <kbd className="hidden font-mono text-[10px] text-muted-foreground/70 sm:inline">⌘↵</kbd>
+              <Button
+                size="lg"
+                onClick={onGenerate}
+                disabled={running || prompt.trim().length < 8 || !walletConnected}
+                className="gap-1.5"
+              >
+                {running ? <Loader2 className="animate-spin" /> : <Sparkles className="size-4" />}
+                {running ? dict.hero.generating : dict.hero.generate}
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <>
+          <Textarea
+            rows={5}
+            placeholder={walletConnected ? dict.hero.placeholderConnected : dict.hero.placeholderDisconnected}
+            value={prompt}
+            disabled={!walletConnected}
+            onChange={(e) => setPrompt(e.target.value)}
+            className="min-h-[140px] resize-none text-sm"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                void onGenerate();
+              }
+            }}
+          />
+          <div className="flex flex-wrap items-center gap-3 border-t border-border pt-3">
+            <Button onClick={onGenerate} disabled={running || prompt.trim().length < 8 || !walletConnected}>
+              {running ? <Loader2 className="animate-spin" /> : null}
+              {running ? dict.hero.generating : dict.hero.generate}
+            </Button>
+            <span className="fgv-mono-label">⌘↵</span>
+          </div>
+        </>
+      )}
+      <div
+        className={
+          heroLayout ? "flex flex-wrap items-center justify-center gap-1.5" : "flex flex-wrap gap-2"
+        }
+      >
+        {heroLayout && <span className="fgv-mono-label mr-1">{dict.hero.examplesLabel}</span>}
+        {/* Kept to three short pills in the hero: a long list wraps into a
+            column and reads as clutter next to the composer. */}
+        {(heroLayout ? dict.hero.examples.slice(0, 3) : dict.hero.examples).map((ex) => (
+          <button key={ex} type="button" disabled={!walletConnected} onClick={() => setPrompt(ex)} className="fgv-chip">
+            {ex.length > 30 ? `${ex.slice(0, 30)}…` : ex}
           </button>
         ))}
       </div>
-      <div className="flex flex-wrap items-center gap-3 border-t border-border/60 pt-3">
-        <Button
-          variant="default"
-          size={heroLayout ? "lg" : "default"}
-          onClick={onGenerate}
-          disabled={running || prompt.trim().length < 8 || !walletConnected}
-          className={heroLayout ? "gap-2" : undefined}
-        >
-          {running ? <Loader2 className="animate-spin" /> : <Sparkles className={heroLayout ? "size-4" : "hidden"} />}
-          {running ? dict.hero.generating : dict.hero.generate}
-        </Button>
-        <span className="text-xs text-muted-foreground">⌘↵</span>
-        {error && <p className="text-sm text-destructive">{error}</p>}
-      </div>
+      {error && <p className="text-xs text-destructive">{error}</p>}
     </div>
   );
 
@@ -828,28 +874,56 @@ export default function CodegenStudio({ onChatActive, heroLayout = false }: Prop
           on normal-height screens it still reads as a single, non-scrolling
           hero because the content fits within one viewport.
         */}
-        <section className="relative mb-0 h-screen w-full overflow-hidden">
+        <section className="relative mb-0 flex h-screen w-full flex-col overflow-hidden">
           <HeroBackdrop />
-          <div className="relative z-10 mx-auto flex h-full w-full max-w-[1200px] items-center justify-center px-4 pt-14 sm:px-6 lg:px-8">
-            <div className="w-full max-w-[680px] py-3 text-center">
-              <h1 className="mb-3 flex flex-col gap-0.5 font-display font-bold leading-[0.98] tracking-[-0.02em] text-foreground">
-                <span className="fgv-kinetic-line block overflow-hidden text-[clamp(1.6rem,3.4vw+2.2vh,4rem)] lg:text-[clamp(1.9rem,2.6vw+2.2vh,4.6rem)]">
-                  {dict.hero.headlineLine1}
-                </span>
-                <span className="fgv-kinetic-line block overflow-hidden text-[clamp(1.6rem,3.4vw+2.2vh,4rem)] lg:text-[clamp(1.9rem,2.6vw+2.2vh,4.6rem)]">
-                  {dict.hero.headlineLine2}
-                </span>
-                <span className="block h-0.5" aria-hidden />
-                <span className="fgv-kinetic-line block overflow-hidden text-[clamp(1.3rem,2.7vw+1.8vh,3.4rem)]">
-                  <span className="mr-[0.25em] font-medium text-muted-foreground">{dict.hero.withWord}</span>
-                  <span className="fgv-accent-gradient italic">{dict.hero.accentWord}</span>
-                </span>
+          {/*
+            Centred in the space above the pillar row. Sitting the content higher
+            (as the reference sites do) only works when a figure fills the band
+            underneath it; with nothing there it just reads as a dead gap.
+          */}
+          <div className="relative z-10 mx-auto flex w-full max-w-[1200px] flex-1 items-center justify-center px-4 pt-14 sm:px-6 lg:px-8">
+            {/* One centred column: headline, then the composer directly under it,
+                so the whole fold has a single axis instead of a left/right split. */}
+            <div className="w-full max-w-[820px] py-4">
+              {/*
+                Two-tone headline: the statement in full-contrast white, then the
+                explanation continuing inline at the SAME size in dim gray. That
+                single device is what makes the reference pages read the way they
+                do — a smaller grey paragraph underneath does not.
+              */}
+              <h1 className="text-center font-display text-[clamp(1.55rem,1.7vw+2vh,3.1rem)] font-semibold leading-[1.12] tracking-[-0.03em]">
+                <span className="fgv-kinetic-line text-foreground">
+                  {dict.hero.headlineLine1} {dict.hero.headlineLine2}.
+                </span>{" "}
+                <span className="fgv-kinetic-line text-muted-foreground">{dict.hero.headlineDim}</span>
               </h1>
-              <p className="mx-auto mb-3 max-w-[480px] text-[13px] leading-relaxed text-muted-foreground sm:text-sm lg:text-[15px] lg:leading-7">
-                {dict.hero.subtitle}
-              </p>
-              {promptPanel}
-              <p className="mt-2 text-[11px] tracking-wide text-muted-foreground/70">{dict.hero.trustLine}</p>
+
+              <div className="mx-auto mt-7 w-full">
+                {promptPanel}
+                <p className="mt-3 text-center text-[11px] text-muted-foreground/60">{dict.hero.trustLine}</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Hairline-divided pillars closing the fold. Needs both the width to
+              sit them side by side and the height to fit them, otherwise the
+              fold would clip them mid-sentence. */}
+          <div className="relative z-10 hidden shrink-0 border-t border-border [@media(min-width:640px)_and_(min-height:760px)]:block">
+            <div className="mx-auto grid w-full max-w-[1200px] grid-cols-1 sm:grid-cols-3">
+              {dict.hero.pillars.map((p, i) => (
+                <div
+                  key={p.title}
+                  className={
+                    i === 0
+                      ? "px-4 py-5 sm:px-6 lg:px-8"
+                      : "border-border px-4 py-5 sm:border-l sm:px-6 lg:px-8"
+                  }
+                >
+                  <p className="fgv-mono-label">{p.label}</p>
+                  <p className="mt-3 text-[0.8rem] font-medium text-foreground">{p.title}</p>
+                  <p className="mt-1 text-[0.75rem] leading-relaxed text-muted-foreground">{p.body}</p>
+                </div>
+              ))}
             </div>
           </div>
         </section>
