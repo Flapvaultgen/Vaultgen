@@ -210,8 +210,9 @@ Connect MetaMask when the page loads — you'll sign one message to prove wallet
 
 | Priority | Item |
 |----------|------|
-| 1 | Archetype #2: bonding-curve vault (new base contract + custom UI track) |
-| 2 | Plan approval step — show mechanic spec before codegen starts |
-| 3 | Fork simulation preview — show user journeys run before launch |
+| 1 | Plan approval step — show mechanic spec before codegen starts |
+| 2 | Fork simulation preview — show user journeys run before launch |
 
 Robinhood Chain: parked. The vault base contracts already resolve its Portal/VaultPortal/Guardian addresses (harmless no-op for BSC), but the launch UI stays BSC-only — decided against pursuing it further (no Robinhood testnet, real-ETH-only risk).
+
+Note: there is deliberately no "archetype #2" / template-menu item here. The generator is already archetype-free (see `server/constitution.ts`, `server/codegen-prompts.ts`, `server/vault-scope.ts`) — every vault comes from the user's freely-described mechanic, judged only against Flap's actual protocol rules, never matched against a fixed vault-kind vocabulary. A previous version of this roadmap listed a "bonding-curve vault archetype," which was a stray idea that doesn't hold up anyway — a vault running its own internal AMM/bonding-curve market is explicitly out of scope per `vault-scope.ts` (it needs a second token/market primitive the tax-vault model doesn't support).
