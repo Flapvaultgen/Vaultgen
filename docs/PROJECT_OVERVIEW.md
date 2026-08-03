@@ -145,7 +145,7 @@ Before any code is generated, the studio classifies whether the idea fits Flap's
 | Solidity toolchain | Foundry (forge build, forge test) · solc 0.8.26 |
 | Database | Supabase (PostgreSQL) — optional; in-memory fallback |
 | Auth | SIWE-lite: nonce → MetaMask sign → HMAC session token |
-| Chain | BSC Testnet (97) + BSC Mainnet (56) · Robinhood Chain (4663) wired at the contract layer, launch UI still BSC-only |
+| Chain | BSC Testnet (97) + BSC Mainnet (56) — the only chains the app actually launches on |
 
 ---
 
@@ -210,7 +210,8 @@ Connect MetaMask when the page loads — you'll sign one message to prove wallet
 
 | Priority | Item |
 |----------|------|
-| 1 | Robinhood Chain launch UI (chain ID 4663) — contract-layer addresses (Portal/VaultPortal/Guardian) are already wired into the vault base contracts; still needed: a chain picker + per-chain explorer/GMGN links + a fork-test fixture. No Robinhood testnet exists yet, so a real launch there uses mainnet ETH directly. |
-| 2 | Archetype #2: bonding-curve vault (new base contract + custom UI track) |
-| 3 | Plan approval step — show mechanic spec before codegen starts |
-| 4 | Fork simulation preview — show user journeys run before launch |
+| 1 | Archetype #2: bonding-curve vault (new base contract + custom UI track) |
+| 2 | Plan approval step — show mechanic spec before codegen starts |
+| 3 | Fork simulation preview — show user journeys run before launch |
+
+Robinhood Chain: parked. The vault base contracts already resolve its Portal/VaultPortal/Guardian addresses (harmless no-op for BSC), but the launch UI stays BSC-only — decided against pursuing it further (no Robinhood testnet, real-ETH-only risk).
