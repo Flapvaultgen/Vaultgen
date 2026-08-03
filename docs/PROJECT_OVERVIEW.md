@@ -208,11 +208,12 @@ Connect MetaMask when the page loads — you'll sign one message to prove wallet
 
 ## Roadmap
 
-| Priority | Item |
-|----------|------|
-| 1 | Plan approval step — show mechanic spec before codegen starts |
-| 2 | Fork simulation preview — show user journeys run before launch |
+Both former roadmap items shipped:
+- **Plan approval gate** — a clean, launch-ready MechanicSpec now pauses generation and shows the plan (actors, actions, payout rules) before any Solidity is written; "Approve" resumes into codegen for that exact spec (looked up server-side, never trusted from the client).
+- **Fork simulation preview** — the Review tab now renders the real fork-test user journeys (buy → tax → payout, per-scenario pass/fail) that already ran, instead of that data going unused.
+
+Nothing else is queued right now.
 
 Robinhood Chain: parked. The vault base contracts already resolve its Portal/VaultPortal/Guardian addresses (harmless no-op for BSC), but the launch UI stays BSC-only — decided against pursuing it further (no Robinhood testnet, real-ETH-only risk).
 
-Note: there is deliberately no "archetype #2" / template-menu item here. The generator is already archetype-free (see `server/constitution.ts`, `server/codegen-prompts.ts`, `server/vault-scope.ts`) — every vault comes from the user's freely-described mechanic, judged only against Flap's actual protocol rules, never matched against a fixed vault-kind vocabulary. A previous version of this roadmap listed a "bonding-curve vault archetype," which was a stray idea that doesn't hold up anyway — a vault running its own internal AMM/bonding-curve market is explicitly out of scope per `vault-scope.ts` (it needs a second token/market primitive the tax-vault model doesn't support).
+Note: there is deliberately no "archetype #2" / template-menu item here. The generator is already archetype-free (see `server/constitution.ts`, `server/codegen-prompts.ts`, `server/vault-scope.ts`) — every vault comes from the user's freely-described mechanic, judged only against Flap's actual protocol rules, never matched against a fixed vault-kind vocabulary.
