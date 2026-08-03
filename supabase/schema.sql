@@ -1,5 +1,10 @@
 -- ─────────────────────────────────────────────────────────────────────────────
--- Flap Vault Gen — chat history + generation runs schema
+-- Flap Vault Gen — chat history, generation runs and launched tokens
+--
+-- This is the complete schema: every table the server touches is here, so
+-- running this one file on a fresh project is all that's needed (the file in
+-- supabase/migrations/ is already folded in). Every statement is idempotent,
+-- so it is also safe to re-run against a project that is partly set up.
 --
 -- Apply manually (psql / supabase db push / SQL editor). This repo never runs
 -- migrations automatically; the server falls back to an in-memory store when
@@ -22,9 +27,10 @@ $$;
 
 -- ── users ────────────────────────────────────────────────────────────────────
 -- One row per wallet. Created/updated (upsert) when a wallet connects in the
--- web app (POST /api/users/connect). No auth yet — the wallet address is
--- self-reported by the client, so treat this as identification, not
--- authentication, until signature-based login is added.
+-- web app. The address is proven by a wallet signature the API verifies before
+-- it will touch any of these rows, so it identifies the owner of a chat. The
+-- signed session is stateless (see server/auth.ts) — nothing about it is
+-- stored here.
 
 create table if not exists users (
   id             uuid primary key default gen_random_uuid(),
@@ -104,6 +110,7 @@ create table if not exists generation_runs (
   status               text not null default 'pending'
                        check (status in ('pending', 'running', 'completed', 'failed')),
   -- contract | spec_only | consent_required | refused_unsafe | design_questions
+  -- | plan_pending  (paused for the user to approve the plan before any code)
   deliverable          text,
   scope                jsonb,
   mechanic_spec        jsonb,
@@ -129,7 +136,7 @@ create trigger trg_generation_runs_updated_at
 -- ── generation_events ────────────────────────────────────────────────────────
 -- Ordered progress log per run. event_type values used by the server:
 --   run_started | status | heartbeat | mechanic_spec | scope | design_questions
---   consent_required | code_delta | code_complete | scanner_result
+--   plan_ready | consent_required | code_delta | code_complete | scanner_result
 --   simulation_report | economic_critique | repair_attempt
 --   run_completed | run_failed
 -- (heartbeat and code_delta are streamed live but normally not persisted)
@@ -254,8 +261,10 @@ create trigger trg_launched_tokens_updated_at
 --
 -- The server talks to these tables with the SERVICE ROLE key, which bypasses
 -- RLS entirely — so enabling RLS now is safe and blocks direct anon access.
--- Auth is not wired yet (user_id is nullable), so no per-user policies are
--- created. When auth lands, add policies keyed on chats.user_id = auth.uid().
+-- Ownership is enforced in the API instead (every chat route checks the
+-- signature-proven wallet against chats.user_id); these tables carry no
+-- Supabase-auth users, so there are no auth.uid() policies to write. user_id
+-- stays nullable because a chat can be started before a wallet connects.
 -- ─────────────────────────────────────────────────────────────────────────────
 
 alter table users                enable row level security;
