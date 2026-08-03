@@ -169,7 +169,7 @@ export type CodegenResult = {
   /** Launch-readiness verdict (Phase 6 Draft/Launch model). */
   scope?: VaultScope;
   /** What this result is in the draft/launch flow (Phase 6; Phase 8 adds design_questions). */
-  deliverable?: "contract" | "spec_only" | "consent_required" | "refused_unsafe" | "design_questions";
+  deliverable?: "contract" | "spec_only" | "consent_required" | "refused_unsafe" | "design_questions" | "plan_pending";
   /** Honest preserved/dropped record when the user consented to a closest-draft approximation. */
   approximation?: ApproximationReport | null;
   /** Phase 8: open plain-English design questions (critical ones pause generation). */
@@ -305,6 +305,12 @@ export type CodegenEvent =
       spec: MechanicSpec;
       questions: DesignQuestion[];
       options: { id: ApproximationConsent | "stop"; label: string }[];
+    }
+  | {
+      /** Phase 9: a launch-ready plan is ready for review before any Solidity is written. */
+      type: "plan_ready";
+      scope: VaultScope;
+      spec: MechanicSpec;
     }
   | { type: "result"; result: CodegenResult }
   | { type: "error"; error: string };

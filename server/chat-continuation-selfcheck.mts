@@ -60,7 +60,7 @@ function noopEmit(_ev: CodegenEvent): void {}
     },
   });
 
-  await generator(chat.id, "A vault that burns tax BNB every day", noopEmit, undefined);
+  await generator(chat.id, "A vault that burns tax BNB every day", noopEmit);
   check("first message uses fresh generation", freshCalls.length === 1);
   check("first message prompt is unchanged", freshCalls[0] === "A vault that burns tax BNB every day");
 
@@ -90,7 +90,7 @@ function noopEmit(_ev: CodegenEvent): void {}
     },
   });
 
-  await generator(chat.id, "Epoch reward vault, 7 day cycles", noopEmit, "spec_only");
+  await generator(chat.id, "Epoch reward vault, 7 day cycles", noopEmit, { approximationConsent: "spec_only" });
   check("consent resend uses fresh generation", freshCalls.length === 1);
   check("consent resend keeps the original prompt verbatim", freshCalls[0]?.prompt === "Epoch reward vault, 7 day cycles");
   check("consent resend passes the consent flag through", freshCalls[0]?.consent === "spec_only");
@@ -134,7 +134,7 @@ function noopEmit(_ev: CodegenEvent): void {}
     },
   });
 
-  await generator(chat.id, "continue", noopEmit, undefined);
+  await generator(chat.id, "continue", noopEmit);
   check("follow-up after real code uses refine generation", refineCalls.length === 1);
   const session = refineCalls[0]?.session as {
     initialPrompt: string;
@@ -189,7 +189,7 @@ function noopEmit(_ev: CodegenEvent): void {}
     },
   });
 
-  await generator(chat.id, "continue", noopEmit, undefined);
+  await generator(chat.id, "continue", noopEmit);
   check("follow-up after spec-only run uses fresh generation", freshCalls.length === 1);
   check("composed prompt is not the bare follow-up text", freshCalls[0] !== "continue");
   check("composed prompt carries the original idea", (freshCalls[0] ?? "").includes("Epoch vault where tax BNB accumulates"));
@@ -198,6 +198,72 @@ function noopEmit(_ev: CodegenEvent): void {}
     (freshCalls[0] ?? "").includes("7-day reward epoch vault distributed pro-rata")
   );
   check("composed prompt carries the follow-up message", (freshCalls[0] ?? "").includes('"continue"'));
+
+  setChatStoreForTests(null);
+}
+
+// ── 5. approvePlan against a real plan_pending run → seeded fresh generation
+{
+  const store = new MemoryChatStore();
+  setChatStoreForTests(store);
+
+  const chat = await store.createChat({ title: "New vault chat" });
+  await store.createMessage({ chatId: chat.id, role: "user", content: "A vault that raffles tax BNB weekly" });
+  const run1 = await store.createRun({ chatId: chat.id });
+  const approvedSpec = { productSummary: "Weekly raffle vault", contractName: "WeeklyRaffleVault" };
+  await store.updateRun(run1.id, { status: "completed", deliverable: "plan_pending", mechanicSpec: approvedSpec });
+  await store.createMessage({
+    chatId: chat.id,
+    role: "assistant",
+    content: "Plan ready for your review: Weekly raffle vault.",
+    status: "completed",
+  });
+  await store.createMessage({ chatId: chat.id, role: "user", content: "A vault that raffles tax BNB weekly" });
+
+  let freshCalls: { prompt: string; consent?: string; spec?: unknown }[] = [];
+  const generator = makeContinuationAwareGenerator({
+    freshGenerate: async (prompt, _apiKey, _model, _emit, consent, spec) => {
+      freshCalls.push({ prompt, consent, spec });
+    },
+    refineGenerate: async () => {
+      throw new Error("refine should not be called for a plan approval");
+    },
+  });
+
+  await generator(chat.id, "A vault that raffles tax BNB weekly", noopEmit, { approvePlan: true });
+  check("plan approval uses fresh generation", freshCalls.length === 1);
+  check("plan approval passes no approximation consent", freshCalls[0]?.consent === undefined);
+  check(
+    "plan approval seeds the exact spec that was shown, looked up server-side",
+    JSON.stringify(freshCalls[0]?.spec) === JSON.stringify(approvedSpec)
+  );
+
+  setChatStoreForTests(null);
+}
+
+// ── 6. approvePlan with no matching plan_pending run → falls through safely
+{
+  const store = new MemoryChatStore();
+  setChatStoreForTests(store);
+
+  const chat = await store.createChat({ title: "New vault chat" });
+  await store.createMessage({ chatId: chat.id, role: "user", content: "A vault that burns tax BNB every day" });
+
+  let freshCalls: { prompt: string; spec?: unknown }[] = [];
+  const generator = makeContinuationAwareGenerator({
+    freshGenerate: async (prompt, _apiKey, _model, _emit, _consent, spec) => {
+      freshCalls.push({ prompt, spec });
+    },
+    refineGenerate: async () => {
+      throw new Error("refine should not be called for a first message");
+    },
+  });
+
+  // A forged/stale approvePlan flag with nothing to approve must never skip
+  // the real gates — it just behaves like a normal first-time generation.
+  await generator(chat.id, "A vault that burns tax BNB every day", noopEmit, { approvePlan: true });
+  check("stale approvePlan falls back to plain fresh generation", freshCalls.length === 1);
+  check("stale approvePlan never seeds an unverified spec", freshCalls[0]?.spec === undefined);
 
   setChatStoreForTests(null);
 }

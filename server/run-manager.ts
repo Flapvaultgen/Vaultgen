@@ -19,11 +19,17 @@ export type RunStreamEvent = {
   payload?: unknown;
 };
 
+export type PipelineGeneratorOpts = {
+  approximationConsent?: ApproximationConsent;
+  /** Phase 9: the user approved a previously shown plan — resume straight into codegen for it. */
+  approvePlan?: boolean;
+};
+
 export type PipelineGenerator = (
   chatId: string,
   prompt: string,
   emit: (ev: CodegenEvent) => void,
-  approximationConsent?: ApproximationConsent
+  opts?: PipelineGeneratorOpts
 ) => Promise<void>;
 
 type RegisteredRun = {
@@ -32,6 +38,7 @@ type RegisteredRun = {
   assistantMessageId: string;
   prompt: string;
   approximationConsent?: ApproximationConsent;
+  approvePlan?: boolean;
   status: "pending" | "running" | "completed" | "failed";
   sequence: number;
   buffer: RunStreamEvent[];
@@ -78,6 +85,7 @@ export class RunManager {
     assistantMessageId: string;
     prompt: string;
     approximationConsent?: ApproximationConsent;
+    approvePlan?: boolean;
   }): void {
     if (this.runs.has(input.runId)) return;
     this.runs.set(input.runId, {
@@ -178,7 +186,7 @@ export class RunManager {
             }
           );
         },
-        run.approximationConsent
+        { approximationConsent: run.approximationConsent, approvePlan: run.approvePlan }
       );
     } catch (err) {
       streamError = err instanceof Error ? err.message : "Codegen failed";
@@ -248,6 +256,12 @@ export class RunManager {
         await this.event(run, "consent_required", "Waiting for your choice — idea is not launch-ready as requested.", {
           scope: ev.scope,
           options: ev.options,
+          spec: ev.spec,
+        });
+        break;
+      case "plan_ready":
+        await this.event(run, "plan_ready", "Plan ready for review.", {
+          scope: ev.scope,
           spec: ev.spec,
         });
         break;

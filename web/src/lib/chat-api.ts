@@ -72,6 +72,7 @@ export type GenerationEventType =
   | "scope"
   | "design_questions"
   | "consent_required"
+  | "plan_ready"
   | "code_delta"
   | "code_complete"
   | "scanner_result"
@@ -202,6 +203,9 @@ export function startGeneration(input: {
   prompt: string;
   chatId?: string;
   approximationConsent?: ApproximationConsent;
+  /** Approves the MechanicSpec shown by the last "plan_ready" pause in this chat —
+   * the server looks the exact spec up itself, never trusts one from the client. */
+  approvePlan?: boolean;
   metadata?: Record<string, unknown>;
 }): Promise<StartGenerationResponse> {
   // Ownership is derived server-side from the session token on this request.

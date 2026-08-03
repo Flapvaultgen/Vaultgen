@@ -131,8 +131,8 @@ export type CodegenResult = {
   mechanicSpec: MechanicSpec;
   /** Launch-readiness verdict (Phase 6 Draft/Launch model). */
   scope?: VaultScope;
-  /** What this result is in the draft/launch flow (Phase 6; Phase 8 adds design_questions). */
-  deliverable: "contract" | "spec_only" | "consent_required" | "refused_unsafe" | "design_questions";
+  /** What this result is in the draft/launch flow (Phase 6; Phase 8 adds design_questions; Phase 9 adds plan_pending). */
+  deliverable: "contract" | "spec_only" | "consent_required" | "refused_unsafe" | "design_questions" | "plan_pending";
   /** Honest preserved/dropped record when the user consented to a closest-draft approximation. */
   approximation: ApproximationReport | null;
   /** Phase 8: open plain-English design questions (critical ones pause generation until answered/consented). */
@@ -1897,6 +1897,13 @@ export type CodegenEvent =
       questions: DesignQuestion[];
       options: { id: ApproximationConsent | "stop"; label: string }[];
     }
+  | {
+      /** Phase 9: a clean, launch-ready MechanicSpec is ready — generation pauses so the
+       * user can see the plan (actors, actions, payouts) before any Solidity is written. */
+      type: "plan_ready";
+      scope: VaultScope;
+      spec: MechanicSpec;
+    }
   | { type: "result"; result: CodegenResult }
   | { type: "error"; error: string };
 
@@ -2058,7 +2065,7 @@ async function aiGenerateStream(
 function earlyStopResult(
   mechanicSpec: MechanicSpec,
   scope: VaultScope,
-  deliverable: "spec_only" | "consent_required" | "refused_unsafe" | "design_questions",
+  deliverable: "spec_only" | "consent_required" | "refused_unsafe" | "design_questions" | "plan_pending",
   approximation: ApproximationReport | null,
   designQuestions: DesignQuestion[] = []
 ): Omit<CodegenResult, "mode" | "tokenUsage"> {
@@ -2069,7 +2076,9 @@ function earlyStopResult(
         ? `Draft spec only (your choice): ${scope.summary}`
         : deliverable === "design_questions"
           ? `Your idea needs ${designQuestions.length} design decision(s) before safe code can be generated. Answer the questions (refine your prompt), or choose a conservative safe draft with the defaults explained.`
-          : `Awaiting your choice: ${scope.summary} Pick how to proceed — closest Flap-compatible draft, spec-only draft, or stop.`;
+          : deliverable === "plan_pending"
+            ? `Plan ready for your review: ${mechanicSpec.productSummary || scope.summary} Approve it to generate the Solidity contract, or reply with changes first.`
+            : `Awaiting your choice: ${scope.summary} Pick how to proceed — closest Flap-compatible draft, spec-only draft, or stop.`;
   return {
     contractName: mechanicSpec.contractName || "GeneratedVault",
     explanation,
@@ -2215,6 +2224,17 @@ async function runCodegenPipeline(opts: {
           attempt: 0,
           message: `Proceeding with ${applied.decisions.length} safe conservative design choice(s) — each is recorded in the result.`,
         });
+      }
+
+      // ── Phase 9 plan-approval gate: a clean, launch-ready idea that never
+      //    needed a consent or design-question decision still deserves a look
+      //    before we spend tokens writing Solidity the user might not want.
+      //    Skipped when the user already made an explicit consent choice this
+      //    turn (they already said "go ahead") — that path goes straight to
+      //    code, same as before Phase 9.
+      if (!approximationConsent) {
+        emit?.({ type: "plan_ready", scope, spec: mechanicSpec });
+        return earlyStopResult(mechanicSpec, scope, "plan_pending", approximation);
       }
     }
   }
@@ -3111,7 +3131,11 @@ export async function generateVaultCodeStream(
   apiKey: string | undefined,
   model: string,
   emit: (ev: CodegenEvent) => void,
-  approximationConsent?: ApproximationConsent
+  approximationConsent?: ApproximationConsent,
+  /** Phase 9: an already-approved MechanicSpec (the user clicked "approve" on a
+   * previously shown plan) — skips re-planning and every consent/design/plan gate,
+   * going straight to Solidity for THIS exact spec. */
+  approvedMechanicSpec?: MechanicSpec
 ): Promise<void> {
   if (!apiKey) {
     const stub = stubResult(prompt);
@@ -3135,6 +3159,7 @@ export async function generateVaultCodeStream(
         stream: true,
         emit,
         approximationConsent,
+        mechanicSpec: approvedMechanicSpec,
       })
     );
 

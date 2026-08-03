@@ -14,10 +14,11 @@ import {
   type RefineChatTurn,
   type RefineSession,
 } from "./codegen.js";
+import type { MechanicSpec } from "./mechanic-spec.js";
 import { resolveAiModel } from "./ai-model.js";
 import { getChatStore } from "./chat-store.js";
 import { isSupabaseConfigured } from "./supabase.js";
-import { RunManager, type RunStreamEvent } from "./run-manager.js";
+import { RunManager, type PipelineGeneratorOpts, type RunStreamEvent } from "./run-manager.js";
 import type { StartGenerationResponse } from "./chat-types.js";
 import {
   createSessionToken,
@@ -91,6 +92,13 @@ function sendForbidden(res: Response): void {
  * generateVaultCodeRefineStream directly) so the branch-selection logic can
  * be unit-tested with stub generators, without needing a real API key or an
  * HTTP/SSE round-trip.
+ *
+ * Phase 9 adds one more entry point: approvePlan. When the last completed run
+ * paused with deliverable "plan_pending" (the plan-approval gate — see
+ * codegen.ts), the frontend's "Approve" button resends the original prompt
+ * with approvePlan set. The exact MechanicSpec is looked up SERVER-SIDE from
+ * that run (never trusted from the client) and fed back in as an already-
+ * approved spec, skipping straight to Solidity for that spec only.
  */
 export function makeContinuationAwareGenerator(deps?: {
   freshGenerate?: typeof generateVaultCodeStream;
@@ -103,10 +111,12 @@ export function makeContinuationAwareGenerator(deps?: {
     chatId: string,
     prompt: string,
     emit: (ev: CodegenEvent) => void,
-    approximationConsent?: ApproximationConsent
+    opts?: PipelineGeneratorOpts
   ): Promise<void> {
     const apiKey = process.env.ANTHROPIC_API_KEY;
     const model = resolveAiModel();
+    const approximationConsent = opts?.approximationConsent;
+    const approvePlan = opts?.approvePlan === true;
 
     // A design-question / consent choice resends the ORIGINAL idea verbatim
     // alongside an explicit consent flag — always treat that as a fresh
@@ -131,6 +141,15 @@ export function makeContinuationAwareGenerator(deps?: {
       .filter((r) => r.status === "completed")
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
     const lastCompletedRun = completedRuns[completedRuns.length - 1];
+
+    // Plan approval: only honored when the run it points at actually stopped
+    // at "plan_pending" WITH a stored spec — a stale or forged flag just
+    // falls through to the normal branches below (still safe: a fresh
+    // replan re-runs every consent/design gate honestly).
+    if (approvePlan && lastCompletedRun?.deliverable === "plan_pending" && lastCompletedRun.mechanicSpec) {
+      await freshGenerate(prompt, apiKey, model, emit, undefined, lastCompletedRun.mechanicSpec as MechanicSpec);
+      return;
+    }
 
     // No prior completed run in this chat at all → this really is the first
     // generation, even if the chat row was pre-created.
@@ -158,17 +177,20 @@ export function makeContinuationAwareGenerator(deps?: {
       }
     }
 
-    // Last run stopped at a spec/consent/design-question stage — no code
-    // exists yet. Fold the original idea + what was already decided into the
-    // new prompt so the follow-up ("continue", "yes go ahead", …) reads as a
-    // continuation of that spec rather than an unrelated one-word idea.
+    // Last run stopped at a spec/consent/design-question/plan-review stage —
+    // no code exists yet. Fold the original idea + what was already decided
+    // into the new prompt so the follow-up ("continue", "make it 14 days
+    // instead", …) reads as a continuation of that spec rather than an
+    // unrelated one-word idea. This naturally replans (never seeds a spec),
+    // so a plan_pending run whose changes are requested here will produce an
+    // updated MechanicSpec and pause for approval again — same gate, new plan.
     const lastAssistantReply = [...priorMessages].reverse().find((m) => m.role === "assistant" && m.content.trim().length > 0);
     const composedPrompt =
       firstUserMessage === prompt
         ? prompt
         : `Original vault idea:\n${firstUserMessage}\n\n${
             lastAssistantReply ? `What we already agreed on:\n${lastAssistantReply.content.trim()}\n\n` : ""
-          }The user's next message: "${prompt}"\n\nContinue from there and produce the actual Solidity contract now.`;
+          }The user's next message: "${prompt}"\n\nContinue from there, taking this into account.`;
 
     await freshGenerate(composedPrompt, apiKey, model, emit, approximationConsent);
   };
@@ -307,6 +329,7 @@ export function createChatRouter(): Router {
         assistantMessageId: assistantMessage.id,
         prompt,
         approximationConsent: parseConsent(req.body?.approximationConsent),
+        approvePlan: req.body?.approvePlan === true,
       });
 
       const payload: StartGenerationResponse = {

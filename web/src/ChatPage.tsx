@@ -31,7 +31,7 @@ import {
   type GeneratedArtifact,
   type RunStreamEvent,
 } from "./lib/chat-api";
-import type { ApproximationConsent, CodegenResult, RepairAttempt } from "./lib/codegen";
+import type { ApproximationConsent, CodegenResult, MechanicSpec, RepairAttempt, VaultScope } from "./lib/codegen";
 import { getDeployBlockReason, isDeployReady, isLaunchReady, scopeAllowsLaunch } from "./lib/deploy-gate";
 import { isUsableCreationBytecode } from "./lib/flap-register";
 import { loadVaultBytecode, saveVaultBytecode } from "./lib/studio-config";
@@ -40,6 +40,8 @@ import { chatPath, navigate, replaceUrl } from "./lib/router";
 import EconomicCriticPanel from "./components/EconomicCriticPanel";
 import GenerationMilestoneStepper from "./components/GenerationMilestoneStepper";
 import LaunchOnFlapPanel from "./components/LaunchOnFlapPanel";
+import PlanReviewCard from "./components/PlanReviewCard";
+import SimulationJourneysPanel from "./components/SimulationJourneysPanel";
 import VaultCustomUI from "./components/VaultCustomUI";
 import { downloadVaultUiPackage, parseVaultUiArtifact } from "./lib/vault-ui-bridge";
 import { RepairSummaryBanner } from "./CodegenStudio";
@@ -162,6 +164,8 @@ export default function ChatPage({ chatId }: Props) {
   const [result, setResult] = useState<CodegenResult | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
   const [consent, setConsent] = useState<ConsentPrompt | null>(null);
+  const [planPending, setPlanPending] = useState<{ scope: VaultScope; spec: MechanicSpec } | null>(null);
+  const [approvingPlan, setApprovingPlan] = useState(false);
 
   const [artifacts, setArtifacts] = useState<GeneratedArtifact[]>([]);
   const [input, setInput] = useState("");
@@ -182,7 +186,8 @@ export default function ChatPage({ chatId }: Props) {
   );
   const codeRef = useRef<HTMLPreElement>(null);
 
-  const streaming = activeRunId !== null && result === null && runError === null && consent === null;
+  const streaming =
+    activeRunId !== null && result === null && runError === null && consent === null && planPending === null;
 
   const lastUserPrompt = useMemo(() => {
     const userMessages = messages.filter((m) => m.role === "user");
@@ -241,11 +246,20 @@ export default function ChatPage({ chatId }: Props) {
       setResult(null);
       setRunError(null);
       setConsent(null);
+      setPlanPending(null);
+      setApprovingPlan(false);
 
       const onEvent = (ev: RunStreamEvent) => {
         switch (ev.type) {
           case "heartbeat":
             break;
+          case "plan_ready": {
+            const scope = ev.payload?.scope as VaultScope | undefined;
+            const spec = ev.payload?.spec as MechanicSpec | undefined;
+            if (scope && spec) setPlanPending({ scope, spec });
+            setProgress(null);
+            break;
+          }
           case "code_delta":
             setLiveCode((c) => c + String(ev.payload?.delta ?? ""));
             break;
@@ -377,11 +391,11 @@ export default function ChatPage({ chatId }: Props) {
   }, [liveCode]);
 
   const startNewRun = useCallback(
-    async (prompt: string, approximationConsent?: ApproximationConsent) => {
+    async (prompt: string, approximationConsent?: ApproximationConsent, approvePlan?: boolean) => {
       setSending(true);
       setRunError(null);
       try {
-        const resp = await startGeneration({ prompt, chatId, approximationConsent });
+        const resp = await startGeneration({ prompt, chatId, approximationConsent, approvePlan });
         if (!getCurrentUserId()) rememberLocalAnonymousChat(chatId);
         replaceUrl(chatPath(chatId, resp.runId));
         await refreshMessages();
@@ -404,6 +418,16 @@ export default function ChatPage({ chatId }: Props) {
 
   const onRetry = useCallback(() => {
     if (lastUserPrompt) void startNewRun(lastUserPrompt);
+  }, [lastUserPrompt, startNewRun]);
+
+  const onApprovePlan = useCallback(async () => {
+    if (!lastUserPrompt) return;
+    setApprovingPlan(true);
+    try {
+      await startNewRun(lastUserPrompt, undefined, true);
+    } finally {
+      setApprovingPlan(false);
+    }
   }, [lastUserPrompt, startNewRun]);
 
   const copySource = useCallback(async (text: string) => {
@@ -463,7 +487,8 @@ export default function ChatPage({ chatId }: Props) {
         ? (persistedVault.creationBytecode ?? loadVaultBytecode(result.contractName))
         : null;
   const repairAttempts: RepairAttempt[] = result?.repairAttempts ?? [];
-  const hasReviewContent = Boolean(result?.economicCritique) || repairAttempts.length > 0;
+  const hasReviewContent =
+    Boolean(result?.economicCritique) || repairAttempts.length > 0 || (result?.simulationReport?.scenarios?.length ?? 0) > 0;
 
   // Jump straight to the launch tab when a run finishes deploy-ready — the
   // next action should be obvious without scrolling past the code block.
@@ -593,6 +618,15 @@ export default function ChatPage({ chatId }: Props) {
                   </Button>
                 </div>
               </div>
+            )}
+
+            {planPending && (
+              <PlanReviewCard
+                scope={planPending.scope}
+                spec={planPending.spec}
+                approving={approvingPlan || sending}
+                onApprove={() => void onApprovePlan()}
+              />
             )}
 
             {runError && (
@@ -755,6 +789,9 @@ export default function ChatPage({ chatId }: Props) {
 
                 {!streaming && isContractResult && result && resultTab === "review" && (
                   <div className="flex flex-col gap-3 overflow-y-auto">
+                    {result.simulationReport && result.simulationReport.scenarios.length > 0 && (
+                      <SimulationJourneysPanel report={result.simulationReport} />
+                    )}
                     {result.economicCritique && <EconomicCriticPanel report={result.economicCritique} />}
                     {repairAttempts.length > 0 && <RepairSummaryBanner attempts={repairAttempts} />}
                     {!hasReviewContent && (

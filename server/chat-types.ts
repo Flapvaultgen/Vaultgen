@@ -71,6 +71,7 @@ export type GenerationEventType =
   | "scope"
   | "design_questions"
   | "consent_required"
+  | "plan_ready"
   | "code_delta"
   | "code_complete"
   | "scanner_result"
