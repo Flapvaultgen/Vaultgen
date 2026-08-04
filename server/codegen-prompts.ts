@@ -264,6 +264,23 @@ PRODUCTION QUALITY BAR (match FreeCoin.sol / Flap reference vaults — incomplet
   with the SAME name — scan rejects missing ones (public-state-not-in-uischema).
 - ANY method that pulls tokens via transferFrom MUST include ApproveAction on taxToken in vaultUISchema.
 
+OUTPUT ECONOMY (every character you emit is time the user waits — and every repair pass re-emits
+the WHOLE contract, so verbosity is paid again on each one):
+- NO decorative comment banners, no ASCII rules/box-drawing separators, no section headers made of
+  = - ═ or ─ characters. Write plain // comments only where the intent is genuinely non-obvious.
+- Do NOT restate the Flap rules, this prompt, the MechanicSpec, or your reasoning in comments.
+  Never annotate a line with the rule number it satisfies.
+- One short NatSpec/// line per external function at most; no @param/@return blocks for
+  self-explanatory arguments, and no per-field comments on structs and events.
+- Keep every vaultUISchema description to one compact bilingual line (aim under 200 characters) —
+  those are UI labels, not documentation.
+- description() stays tight too, but NEVER at the cost of a required disclosure: keep every trust,
+  Guardian-recovery, AI-provider and off-chain-review statement the rules ask for, just say each one
+  once and briefly.
+- Never repeat the same explanatory sentence in both description() and a comment.
+- Shortest correct contract wins: no unused helpers, no convenience views the spec did not ask for,
+  no duplicate getters for a public variable that already has one.
+
 UI SCHEMA (vaultUISchema) — common AI mistakes to AVOID:
 - schema.methods[] is ONLY for user-callable write methods AND custom view helpers — NEVER list
   "description" or "vaultUISchema" as methods (those are separate overrides).
@@ -295,7 +312,6 @@ BUCKET ACCOUNTING — when using the named buckets from the MechanicSpec:
 - NEVER pay oracle fees or payouts from undifferentiated address(this).balance while bucket counters
   still show funds — deduct from the correct bucket before the external call.
 - NEVER use require(address(this).balance >= X) for bucket-funded actions without syncing buckets.
-
 CONDITIONAL GUIDANCE — apply ONLY the sections the MechanicSpec actually needs. Check its actions,
 oracleActions, scheduledActions, payoutRules, fundsIn, and ruleAnalysis; do not add machinery the
 spec does not ask for.

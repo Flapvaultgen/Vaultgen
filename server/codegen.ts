@@ -55,6 +55,7 @@ import {
   type AiUsageTotals,
 } from "./ai-client.js";
 import { createHash } from "node:crypto";
+import { logRunTimings, timePhase, withRunTimings, type PhaseTiming } from "./run-timing.js";
 import {
   formatConstitutionForPrompt,
   formatRuleFixGuidance,
@@ -171,6 +172,35 @@ export type CodegenResult = {
 const MAX_PIPELINE_ATTEMPTS = 12;
 const MAX_TEST_FIX_ATTEMPTS = 8;
 const MAX_TOTAL_ATTEMPTS = MAX_PIPELINE_ATTEMPTS + MAX_TEST_FIX_ATTEMPTS;
+/**
+ * How many times one blocking rule may be detected before the run gives up on
+ * it. Four detections buy three fix attempts — one broad rewrite plus two
+ * surgical patches. Past that the model is re-emitting the same shape, so the
+ * remaining passes only buy wall time; stopping keeps a single stuck rule from
+ * consuming the whole MAX_PIPELINE_ATTEMPTS budget.
+ */
+const MAX_BLOCKS_PER_RULE = 4;
+/**
+ * How many times the same fork-test failure may repeat before the run stops
+ * rewriting for it. A test that fails identically three times in a row is a
+ * mechanic the model cannot reconcile with the scenario, not a typo — further
+ * passes only add wall time.
+ */
+const MAX_IDENTICAL_TEST_FAILURES = 3;
+
+/**
+ * Collapses a forge failure into a comparable shape: addresses, hashes and
+ * numbers differ run to run (fork block, fuzz values, balances) while the
+ * failing assertion is the same, so they are normalized away.
+ */
+export function testFailureSignature(errors: string): string {
+  return errors
+    .replace(/0x[0-9a-fA-F]{6,}/g, "0x*")
+    .replace(/\d+/g, "#")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 400);
+}
 
 /** Output cap for full-contract generations — a vault + schema comfortably fits. */
 const CODEGEN_MAX_OUTPUT_TOKENS = 32_000;
@@ -1693,7 +1723,6 @@ export function scanSafety(
     if (findings.some((f) => f.rule === mf.rule)) continue;
     add(mf.level ?? "block", mf.rule, mf.detail);
   }
-
   const level: SafetyLevel = findings.some((f) => f.level === "block")
     ? "fail"
     : findings.length
@@ -2143,6 +2172,11 @@ async function runCodegenPipeline(opts: {
   // smaller model there cuts cost without touching codegen quality.
   const advisoryModel = resolveCheapModel();
 
+  // Repair-loop pass counter. Declared up here so the timing helper below can
+  // tag every phase with the pass it belongs to.
+  let attempts = 0;
+  const timed = <T>(phase: string, fn: () => Promise<T>): Promise<T> => timePhase(phase, () => attempts, fn);
+
   let mechanicSpec = seedSpec;
   let scope: VaultScope | undefined;
   let approximation: ApproximationReport | null = null;
@@ -2152,10 +2186,12 @@ async function runCodegenPipeline(opts: {
     emit?.({ type: "status", phase: "classifying", attempt: 0, message: "Planning the mechanic spec (plan-first)…" });
     // Phase 6 main path: MechanicSpec plan + scope verdict, in parallel.
     // No VaultPlan/VaultKind classification anymore.
-    const [plannedSpec, scopeResult] = await Promise.all([
-      planMechanicSpec(userPrompt, apiKey, model),
-      classifyVaultScope(userPrompt, apiKey, advisoryModel),
-    ]);
+    const [plannedSpec, scopeResult] = await timed("plan", () =>
+      Promise.all([
+        planMechanicSpec(userPrompt, apiKey, model),
+        classifyVaultScope(userPrompt, apiKey, advisoryModel),
+      ])
+    );
     mechanicSpec = plannedSpec;
     scope = scopeResult;
     emit?.({ type: "scope", scope });
@@ -2254,6 +2290,24 @@ async function runCodegenPipeline(opts: {
 
   const fixLog: FixLogEntry[] = [];
   const previousFailures = new Set<string>();
+  /** How many passes each blocking rule has cost so far (see MAX_BLOCKS_PER_RULE). */
+  const blockCountByRule = new Map<string, number>();
+  /** How often each distinct fork-test failure has repeated (see MAX_IDENTICAL_TEST_FAILURES). */
+  const testFailureCounts = new Map<string, number>();
+  /**
+   * Set when the loop stops because it is not converging (same rule or same
+   * test failure over and over) rather than because it ran out of passes. The
+   * result must still report this as an exhausted auto-fix — the run stopped
+   * early to save time, not because the vault is fine.
+   */
+  let autoFixGaveUp = false;
+  /** True once the same fork-test failure has repeated its budget away. */
+  const testFixStalled = (errors: string): boolean => {
+    const signature = testFailureSignature(errors);
+    const seen = (testFailureCounts.get(signature) ?? 0) + 1;
+    testFailureCounts.set(signature, seen);
+    return seen >= MAX_IDENTICAL_TEST_FAILURES;
+  };
   let contractName = "GeneratedVault";
   let code = "";
   let explanation = "";
@@ -2261,7 +2315,6 @@ async function runCodegenPipeline(opts: {
   let ok = false;
   let artifactPath = "";
   let filePath = "";
-  let attempts = 0;
   // Sticky once true: avoids re-trying (and re-failing) the default solc profile every pass
   // once we know this contract only fits under EIP-170 with --via-ir. See compile()/
   // tryViaIRRescue() in codegen-compile.ts for why this also prevents build-cache thrashing.
@@ -2347,14 +2400,8 @@ async function runCodegenPipeline(opts: {
     }
     if (!reusableTest || reusableTest.interfaceHash !== interfaceHash || integrationTestPath === null) {
       status("generating_tests", "Writing MechanicSpec journey tests (Rule 006)…");
-      const tr = await generateIntegrationTest(
-        contractName,
-        artifactPath,
-        fullSource,
-        apiKey,
-        model,
-        mechanicSpec,
-        needsViaIr
+      const tr = await timed("testgen", () =>
+        generateIntegrationTest(contractName, artifactPath, fullSource, apiKey, model, mechanicSpec, needsViaIr)
       );
       testJourneys = tr.journeys;
       if (!tr.ok) {
@@ -2373,7 +2420,7 @@ async function runCodegenPipeline(opts: {
 
     const suitePath = integrationTestPath ?? "";
     status("generating_tests", "Running Foundry fork simulation…");
-    const testRun = await runIntegrationTests(contractName, suitePath, needsViaIr);
+    const testRun = await timed("forktest", () => runIntegrationTests(contractName, suitePath, needsViaIr));
     integrationTestsPassed = testRun.ok || testRun.skipped === true;
     simulationReport = buildSimulationReport(contractName, suitePath, testRun.output, testJourneys, testRun);
     emit?.({ type: "simulation_report", report: simulationReport });
@@ -2394,11 +2441,13 @@ async function runCodegenPipeline(opts: {
     if (!ok || !integrationTestsPassed || specAudit.level !== "skipped") return;
     status("auditing", "Flap pre-audit (advisory)…");
     try {
-      specAudit = await runSpecAudit(fullSource, contractName, apiKey, advisoryModel, {
-        compiled: true,
-        safetyFindings: safety.findings,
-        advisory: true,
-      });
+      specAudit = await timed("audit", () =>
+        runSpecAudit(fullSource, contractName, apiKey, advisoryModel, {
+          compiled: true,
+          safetyFindings: safety.findings,
+          advisory: true,
+        })
+      );
     } catch (err) {
       // Advisory-only: an audit-call failure (bad cheap-model id, provider
       // hiccup) must never sink a pipeline whose hard gates already passed.
@@ -2427,14 +2476,14 @@ async function runCodegenPipeline(opts: {
     let lastAssistant: string;
     let outputTruncated = false;
     if (stream && emit) {
-      const gen = await aiGenerateStream(client, model, messages, emit, attempts, lastFix);
+      const gen = await timed("llm", () => aiGenerateStream(client, model, messages, emit, attempts, lastFix));
       lastAssistant = gen.raw;
       contractName = gen.contractName;
       code = gen.code;
       explanation = gen.explanation || explanation;
       outputTruncated = gen.truncated;
     } else {
-      const gen = await aiGenerateJson(client, model, messages);
+      const gen = await timed("llm", () => aiGenerateJson(client, model, messages));
       lastAssistant = gen.raw;
       contractName = gen.contractName;
       code = gen.code;
@@ -2448,7 +2497,7 @@ async function runCodegenPipeline(opts: {
     code = applyCommonCodegenPatches(code);
 
     status("compiling");
-    const res = await compile(contractName, code, { viaIr: needsViaIr });
+    const res = await timed("compile", () => compile(contractName, code, { viaIr: needsViaIr }));
     ok = res.ok;
     compileErrors = res.errors;
     artifactPath = res.artifactPath;
@@ -2482,7 +2531,13 @@ async function runCodegenPipeline(opts: {
     safety = scanSafetyCombined(code, fullSource, contractName, safetyPrompt, undefined, mechanicSpec);
     const blocking = safety.findings.filter((f) => f.level === "block");
     if (blocking.length > 0) {
-      for (const b of blocking) previousFailures.add(b.rule);
+      // Repeats are measured BEFORE recording this pass, so "repeated" means
+      // "this exact rule already blocked an earlier pass".
+      const repeated = blocking.filter((b) => previousFailures.has(b.rule));
+      for (const b of blocking) {
+        previousFailures.add(b.rule);
+        blockCountByRule.set(b.rule, (blockCountByRule.get(b.rule) ?? 0) + 1);
+      }
       pushFix({
         phase: "safety_fix",
         attempt: attempts,
@@ -2490,20 +2545,34 @@ async function runCodegenPipeline(opts: {
         message: blocking[0]!.detail,
       });
       status("fixing", blocking.map((b) => b.rule).join(", "));
+
+      // A rule that has survived this many broad rewrites AND a surgical patch
+      // is not going to fall to another identical pass — each one costs a full
+      // model emission plus a rebuild. Stop and report it instead of spending
+      // the rest of the budget on a loop that is not converging.
+      const exhausted = blocking.filter((b) => (blockCountByRule.get(b.rule) ?? 0) >= MAX_BLOCKS_PER_RULE);
+      if (exhausted.length > 0) {
+        pushFix({
+          phase: "safety_fix",
+          attempt: attempts,
+          rule: exhausted.map((b) => b.rule).join(","),
+          message: `Stopped after ${MAX_BLOCKS_PER_RULE} passes on the same blocking rule — ${exhausted[0]!.detail}`,
+        });
+        autoFixGaveUp = true;
+        break;
+      }
+
       messages.push({ role: "assistant", content: lastAssistant });
-      // Second identical failure = the broad rewrite prompt is not converging;
-      // switch to the surgical patch prompt immediately instead of burning
-      // another full rewrite pass on the same finding.
-      const recentSafety = fixLog.filter((f) => f.phase === "safety_fix").slice(-2);
-      const stuck =
-        recentSafety.length >= 2 &&
-        recentSafety.every((f) => f.rule === recentSafety[0]!.rule);
-      const sameRuleCount = blocking.filter((b) => previousFailures.has(b.rule)).length;
-      pendingFix = stuck || sameRuleCount >= 3
-        ? surgicalSafetyFixPrompt(blocking, recentSafety[0]?.message ?? blocking[0]!.detail)
-        : stream
-          ? safetyFixPromptStream(blocking, attempts, [...previousFailures], mechanicSpec)
-          : safetyFixPrompt(blocking, attempts, [...previousFailures], mechanicSpec);
+      // The broad rewrite prompt gets exactly one shot per rule. The moment a
+      // rule blocks a second time, the broad prompt has demonstrably failed on
+      // it, so escalate straight to the surgical patch prompt rather than
+      // burning another full rewrite discovering the same thing.
+      pendingFix =
+        repeated.length > 0
+          ? surgicalSafetyFixPrompt(blocking, repeated[0]!.detail)
+          : stream
+            ? safetyFixPromptStream(blocking, attempts, [...previousFailures], mechanicSpec)
+            : safetyFixPrompt(blocking, attempts, [...previousFailures], mechanicSpec);
       continue;
     }
 
@@ -2512,7 +2581,7 @@ async function runCodegenPipeline(opts: {
     let sizeFinding = deployedSizeFinding(deployedBytecodeSize);
     if (sizeFinding) {
       status("compiling", "Deployed bytecode over EIP-170 limit — retrying with --via-ir…");
-      const rescued = await tryViaIRRescue(filePath, artifactPath);
+      const rescued = await timed("compile-viair", () => tryViaIRRescue(filePath, artifactPath));
       if (rescued) {
         ({ abi, creationBytecode, bytecodeSize, deployedBytecodeSize } = rescued);
         needsViaIr = true;
@@ -2551,6 +2620,16 @@ async function runCodegenPipeline(opts: {
         });
         break;
       }
+      if (!gate.generationFailed && testFixStalled(gate.errors)) {
+        pushFix({
+          phase: "test_fix",
+          attempt: attempts,
+          rule: "integration-test-failure",
+          message: `Stopped after ${MAX_IDENTICAL_TEST_FAILURES} passes on the same fork-test failure — ${gate.errors.slice(0, 240)}`,
+        });
+        autoFixGaveUp = true;
+        break;
+      }
       messages.push({ role: "assistant", content: lastAssistant });
       pendingFix = stream
         ? testFixPromptStream(gate.errors, attempts, [...previousFailures], mechanicSpec, failingScenarios())
@@ -2570,6 +2649,7 @@ async function runCodegenPipeline(opts: {
     ok &&
     safety.level !== "fail" &&
     !integrationTestsPassed &&
+    !autoFixGaveUp &&
     testFixAttempts < MAX_TEST_FIX_ATTEMPTS
   ) {
     testFixAttempts++;
@@ -2592,19 +2672,21 @@ async function runCodegenPipeline(opts: {
     let lastAssistant: string;
     let outputTruncated = false;
     if (stream && emit) {
-      const gen = await aiGenerateStream(client, model, messages, emit, attempts, {
-        phase: "test_fix",
-        attempt: attempts,
-        rule: "integration-test-failure",
-        message: lastTestErrors.slice(0, 120),
-      });
+      const gen = await timed("llm", () =>
+        aiGenerateStream(client, model, messages, emit, attempts, {
+          phase: "test_fix",
+          attempt: attempts,
+          rule: "integration-test-failure",
+          message: lastTestErrors.slice(0, 120),
+        })
+      );
       lastAssistant = gen.raw;
       contractName = gen.contractName;
       code = gen.code;
       explanation = gen.explanation || explanation;
       outputTruncated = gen.truncated;
     } else {
-      const gen = await aiGenerateJson(client, model, messages);
+      const gen = await timed("llm", () => aiGenerateJson(client, model, messages));
       lastAssistant = gen.raw;
       contractName = gen.contractName;
       code = gen.code;
@@ -2617,7 +2699,7 @@ async function runCodegenPipeline(opts: {
     code = applyCommonCodegenPatches(code);
 
     status("compiling");
-    const res = await compile(contractName, code, { viaIr: needsViaIr });
+    const res = await timed("compile", () => compile(contractName, code, { viaIr: needsViaIr }));
     ok = res.ok;
     compileErrors = res.errors;
     artifactPath = res.artifactPath;
@@ -2646,17 +2728,28 @@ async function runCodegenPipeline(opts: {
     safety = scanSafetyCombined(code, fullSource, contractName, safetyPrompt, undefined, mechanicSpec);
     const blocking = safety.findings.filter((f) => f.level === "block");
     if (blocking.length > 0) {
-      for (const b of blocking) previousFailures.add(b.rule);
+      const repeated = blocking.filter((b) => previousFailures.has(b.rule));
+      for (const b of blocking) {
+        previousFailures.add(b.rule);
+        blockCountByRule.set(b.rule, (blockCountByRule.get(b.rule) ?? 0) + 1);
+      }
       pushFix({
         phase: "safety_fix",
         attempt: attempts,
         rule: blocking.map((b) => b.rule).join(","),
         message: blocking[0]!.detail,
       });
+      if (blocking.some((b) => (blockCountByRule.get(b.rule) ?? 0) >= MAX_BLOCKS_PER_RULE)) {
+        autoFixGaveUp = true;
+        break;
+      }
       messages.push({ role: "assistant", content: lastAssistant });
-      pendingFix = stream
-        ? safetyFixPromptStream(blocking, attempts, [...previousFailures], mechanicSpec)
-        : safetyFixPrompt(blocking, attempts, [...previousFailures], mechanicSpec);
+      pendingFix =
+        repeated.length > 0
+          ? surgicalSafetyFixPrompt(blocking, repeated[0]!.detail)
+          : stream
+            ? safetyFixPromptStream(blocking, attempts, [...previousFailures], mechanicSpec)
+            : safetyFixPrompt(blocking, attempts, [...previousFailures], mechanicSpec);
       continue;
     }
 
@@ -2704,6 +2797,16 @@ async function runCodegenPipeline(opts: {
         });
         break;
       }
+      if (!gate.generationFailed && testFixStalled(gate.errors)) {
+        pushFix({
+          phase: "test_fix",
+          attempt: attempts,
+          rule: "integration-test-failure",
+          message: `Stopped after ${MAX_IDENTICAL_TEST_FAILURES} passes on the same fork-test failure — ${gate.errors.slice(0, 240)}`,
+        });
+        autoFixGaveUp = true;
+        break;
+      }
       messages.push({ role: "assistant", content: lastAssistant });
       pendingFix = stream
         ? testFixPromptStream(gate.errors, attempts, [...previousFailures], mechanicSpec, failingScenarios())
@@ -2721,9 +2824,11 @@ async function runCodegenPipeline(opts: {
   // override scanSafety/integration results.
   let economicCritique: EconomicCriticReport | null = null;
   if (ok && safety.level !== "fail" && fullSource) {
+    // Timed individually rather than as one block: they run concurrently, so a
+    // single wrapper would hide which of the two is the slow one.
     const [, critique] = await Promise.all([
       runAuditIfReady(),
-      runEconomicCriticPass(contractName, fullSource, mechanicSpec, apiKey, advisoryModel),
+      timed("critic", () => runEconomicCriticPass(contractName, fullSource, mechanicSpec, apiKey, advisoryModel)),
     ]);
     economicCritique = critique;
     emit?.({ type: "economic_critique", report: economicCritique });
@@ -2802,17 +2907,19 @@ async function runCodegenPipeline(opts: {
       messages = pruneRetryHistory(messages, messagesHeadLength, fixLog);
 
       if (stream && emit) {
-        const gen = await aiGenerateStream(client, repairModel, messages, emit, attempts, {
-          phase: "critic_repair",
-          attempt: attempts,
-          message: `Economic repair attempt ${repairNum}`,
-        });
+        const gen = await timed("llm-repair", () =>
+          aiGenerateStream(client, repairModel, messages, emit, attempts, {
+            phase: "critic_repair",
+            attempt: attempts,
+            message: `Economic repair attempt ${repairNum}`,
+          })
+        );
         lastAssistantOut = gen.raw;
         contractName = gen.contractName;
         code = gen.code;
         explanation = gen.explanation || explanation;
       } else {
-        const gen = await aiGenerateJson(client, repairModel, messages);
+        const gen = await timed("llm-repair", () => aiGenerateJson(client, repairModel, messages));
         lastAssistantOut = gen.raw;
         contractName = gen.contractName;
         code = gen.code;
@@ -2854,7 +2961,7 @@ async function runCodegenPipeline(opts: {
       };
 
       status("compiling");
-      const res = await compile(contractName, code, { viaIr: needsViaIr });
+      const res = await timed("compile", () => compile(contractName, code, { viaIr: needsViaIr }));
       if (!res.ok) {
         attemptRecord.remainingIssues = ["repair attempt did not compile — rolled back to previous good code"];
         repairAttempts.push(attemptRecord);
@@ -2937,7 +3044,9 @@ async function runCodegenPipeline(opts: {
 
       // Rerun the critic on the accepted repaired code so the loop (and the
       // final report) reflect the new state.
-      economicCritique = await runEconomicCriticPass(contractName, fullSource, mechanicSpec, apiKey, advisoryModel);
+      economicCritique = await timed("critic", () =>
+        runEconomicCriticPass(contractName, fullSource, mechanicSpec, apiKey, advisoryModel)
+      );
       emit?.({ type: "economic_critique", report: economicCritique });
       attemptRecord.criticResult = shouldTriggerCriticRepair(economicCritique) ? "findings_remain" : "clean";
       attemptRecord.remainingIssues = summarizeRemainingIssues(
@@ -2972,7 +3081,9 @@ async function runCodegenPipeline(opts: {
   let uiArtifact: VaultUiArtifact | null = null;
   if (ok && safety.level !== "fail" && integrationTestsPassed) {
     emit?.({ type: "status", phase: "ui_gen", attempt: attempts, message: "Designing the custom vault UI…" });
-    uiArtifact = await generateVaultUi({ client, model, contractName, source: fullSource, spec: mechanicSpec });
+    uiArtifact = await timed("uigen", () =>
+      generateVaultUi({ client, model, contractName, source: fullSource, spec: mechanicSpec })
+    );
     emit?.({
       type: "status",
       phase: "ui_gen",
@@ -3010,6 +3121,7 @@ async function runCodegenPipeline(opts: {
     fixLog,
     uiArtifact,
     autoFixExhausted:
+      autoFixGaveUp ||
       (attempts >= MAX_PIPELINE_ATTEMPTS && safety.level === "fail") ||
       (ok &&
         safety.level !== "fail" &&
@@ -3063,20 +3175,25 @@ export async function generateVaultCode(
   const client = createAiClient(apiKey);
 
   const tokenUsage = createAiUsageTotals();
-  const result = await runWithAiUsage(tokenUsage, () =>
-    runCodegenPipeline({
-      client,
-      model,
-      apiKey,
-      userPrompt: prompt,
-      systemPrompt: CODEGEN_SYSTEM_PROMPT,
-      stream: false,
-      approximationConsent,
-    })
+  const timings: PhaseTiming[] = [];
+  const startedAt = Date.now();
+  const result = await withRunTimings(timings, () =>
+    runWithAiUsage(tokenUsage, () =>
+      runCodegenPipeline({
+        client,
+        model,
+        apiKey,
+        userPrompt: prompt,
+        systemPrompt: CODEGEN_SYSTEM_PROMPT,
+        stream: false,
+        approximationConsent,
+      })
+    )
   );
 
   await cleanupCodegen();
   logAiUsage(tokenUsage);
+  logRunTimings(timings, Date.now() - startedAt);
 
   return { ...result, mode: "openai", tokenUsage };
 }
@@ -3147,20 +3264,24 @@ export async function generateVaultCodeStream(
   const { createAiClient } = await import("./ai-client.js");
   const client = createAiClient(apiKey);
 
+  const timings: PhaseTiming[] = [];
+  const startedAt = Date.now();
   try {
     const tokenUsage = createAiUsageTotals();
-    const result = await runWithAiUsage(tokenUsage, () =>
-      runCodegenPipeline({
-        client,
-        model,
-        apiKey,
-        userPrompt: prompt,
-        systemPrompt: STREAM_SYSTEM_PROMPT,
-        stream: true,
-        emit,
-        approximationConsent,
-        mechanicSpec: approvedMechanicSpec,
-      })
+    const result = await withRunTimings(timings, () =>
+      runWithAiUsage(tokenUsage, () =>
+        runCodegenPipeline({
+          client,
+          model,
+          apiKey,
+          userPrompt: prompt,
+          systemPrompt: STREAM_SYSTEM_PROMPT,
+          stream: true,
+          emit,
+          approximationConsent,
+          mechanicSpec: approvedMechanicSpec,
+        })
+      )
     );
 
     await cleanupCodegen();
@@ -3178,6 +3299,9 @@ export async function generateVaultCodeStream(
   } catch (err) {
     console.error("codegen stream failed:", err);
     emit({ type: "error", error: describeAiError(err) });
+  } finally {
+    // A run that died is exactly the run whose phase timings you want.
+    logRunTimings(timings, Date.now() - startedAt);
   }
 }
 
@@ -3201,22 +3325,26 @@ export async function generateVaultCodeRefineStream(
   const refineSystem = REFINE_STREAM_SYSTEM_PROMPT;
   const seedMessages = buildRefineSeedMessages(session, message, refineSystem);
 
+  const timings: PhaseTiming[] = [];
+  const startedAt = Date.now();
   try {
     emit({ type: "status", phase: "writing", attempt: 0, message: "Applying your refinement…" });
 
     const tokenUsage = createAiUsageTotals();
-    const result = await runWithAiUsage(tokenUsage, () =>
-      runCodegenPipeline({
-        client,
-        model,
-        apiKey,
-        userPrompt: session.initialPrompt,
-        systemPrompt: refineSystem,
-        stream: true,
-        emit,
-        seedMessages,
-        scanPrompt,
-      })
+    const result = await withRunTimings(timings, () =>
+      runWithAiUsage(tokenUsage, () =>
+        runCodegenPipeline({
+          client,
+          model,
+          apiKey,
+          userPrompt: session.initialPrompt,
+          systemPrompt: refineSystem,
+          stream: true,
+          emit,
+          seedMessages,
+          scanPrompt,
+        })
+      )
     );
 
     await cleanupCodegen();
@@ -3234,6 +3362,8 @@ export async function generateVaultCodeRefineStream(
   } catch (err) {
     console.error("codegen refine stream failed:", err);
     emit({ type: "error", error: describeAiError(err) });
+  } finally {
+    logRunTimings(timings, Date.now() - startedAt);
   }
 }
 

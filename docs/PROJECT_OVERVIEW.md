@@ -56,6 +56,7 @@ server/            Node.js AI pipeline + HTTP API (tsx / ESM)
   auth.ts                 — wallet signature auth (nonce + sign + HMAC session token)
   ai-client.ts            — Anthropic SDK client with prompt caching + token tracking
   ai-model.ts             — env-driven model resolution
+  run-timing.ts           — per-pass phase timings for the run summary in the logs
 
 src/               Solidity contracts
   CodegenVaultFactory.sol — on-chain bytecode registry (CREATE2 launch)
@@ -132,6 +133,8 @@ Before any code is generated, the studio classifies whether the idea fits Flap's
 | Custom vault UI | AI generates a React component package rendered in a sandboxed iframe |
 | EIP-170 guard | Bytecode size check before launch; `--via-ir` rescue path for large contracts |
 | Cost tracking | Per-run token usage and estimated USD cost logged for every AI call |
+| Pass budget | A repair pass rewrites the whole contract, so the loop escalates to a surgical patch the moment a rule blocks twice, and abandons a rule (or an identical fork-test failure) after 3 passes instead of spending the full budget on a loop that is not converging |
+| Run timing | Every pass logs its phases (`[codegen-timing] pass 3: … llm 48.2s · compile 7.1s · forktest 39.4s`), so a slow run points at its own bottleneck |
 
 ---
 
