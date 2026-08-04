@@ -35,9 +35,8 @@ export interface Dictionary {
     generate: string;
     generating: string;
     trustLine: string;
-    examples: string[];
-    /** Three hairline-divided pillars closing the fold. */
-    pillars: { label: string; title: string; body: string }[];
+    /** Short chip label + full prompt filled into the composer on click. */
+    examples: { label: string; prompt: string }[];
   };
 
   tokensPage: {

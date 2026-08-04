@@ -39,29 +39,29 @@ export const en: Dictionary = {
     examplesLabel: "Try an idea",
     generate: "Generate Solidity",
     generating: "Generating…",
-    trustLine: "9 Flap safety rules enforced automatically · English & 中文 supported",
+    trustLine: "Launch-ready or draft-only · 9 Flap rules · English & 中文",
     examples: [
-      "Holders vote weekly on which charity wallet receives the treasury bucket",
-      "Users submit quest proofs, the manager approves valid proofs, and approved users claim from a reward bucket",
-      "Referral vault where users set a referrer and the manager settles referral rewards from tax BNB",
-      "Epoch vault where tax BNB accumulates for 7 days, then the manager settles rewards pro-rata to registered participants",
-      "Milestone vault that unlocks actions when treasury BNB crosses set thresholds",
-    ],
-    pillars: [
       {
-        label: "Fig 0.1",
-        title: "No templates",
-        body: "There are no vault templates: your mechanic is built from your own description, not picked from a menu.",
+        label: "Charity vote",
+        prompt: "Holders vote weekly on which charity wallet receives the treasury bucket",
       },
       {
-        label: "Fig 0.2",
-        title: "Gated before launch",
-        body: "Compile, safety scanners, fork tests and a bytecode-size check all have to pass.",
+        label: "Quest rewards",
+        prompt:
+          "Users submit quest proofs, the manager approves valid proofs, and approved users claim from a reward bucket",
       },
       {
-        label: "Fig 0.3",
-        title: "Reviewed, then yours",
-        body: "A Flap spec audit and an economic review are shown to you — every run ends launch-ready or draft-only.",
+        label: "Referral vault",
+        prompt: "Referral vault where users set a referrer and the manager settles referral rewards from tax BNB",
+      },
+      {
+        label: "Epoch settle",
+        prompt:
+          "Epoch vault where tax BNB accumulates for 7 days, then the manager settles rewards pro-rata to registered participants",
+      },
+      {
+        label: "Milestone unlock",
+        prompt: "Milestone vault that unlocks actions when treasury BNB crosses set thresholds",
       },
     ],
   },

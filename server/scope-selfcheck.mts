@@ -176,7 +176,15 @@ check("UI has an explicit consent card", /ConsentCard/.test(studioSrc) && /close
 check("UI shows the approximation report", /ApproximationBanner/.test(studioSrc));
 check(
   "framing copy is plan → test → launch-ready or draft-only",
-  /launch-ready or\s+draft-only/i.test(i18nEnSrc.replace(/\n\s+/g, " ")) && /no vault templates/i.test(i18nEnSrc)
+  /launch-ready or\s+draft-only/i.test(i18nEnSrc.replace(/\n\s+/g, " "))
+);
+check(
+  "landing has no FIG pillar grid",
+  !/pillars\s*:/.test(i18nEnSrc) && !/Fig 0\.\d/.test(i18nEnSrc) && !/dict\.hero\.pillars/.test(studioSrc)
+);
+check(
+  "landing examples are short chips with a full prompt",
+  /label:\s*"Charity vote"/.test(i18nEnSrc) && /prompt:\s*"Holders vote weekly/.test(i18nEnSrc)
 );
 check("web UI carries no vault-kind metadata", !/VaultPlan|vaultPlan|staking_rewards|ai_lottery/.test(studioSrc));
 

@@ -14,7 +14,6 @@ import {
   Info,
   Ban,
   Wallet,
-  ArrowUpRight,
 } from "lucide-react";
 import { useAccount } from "wagmi";
 import {
@@ -717,8 +716,28 @@ export default function CodegenStudio({ onChatActive, heroLayout = false }: Prop
    * and the primary action live inside a single bordered card instead of three
    * loose stacked controls, with the example ideas as hairline pills under it.
    */
+  const exampleChips = (
+    <div className={heroLayout ? "flex flex-col items-center gap-2.5" : "space-y-2"}>
+      <p className={heroLayout ? "fgv-mono-label" : "text-xs text-muted-foreground"}>{dict.hero.examplesLabel}</p>
+      <div className={heroLayout ? "flex flex-wrap items-center justify-center gap-2" : "flex flex-wrap gap-2"}>
+        {dict.hero.examples.map((ex) => (
+          <button
+            key={ex.label}
+            type="button"
+            disabled={!walletConnected}
+            onClick={() => setPrompt(ex.prompt)}
+            className="fgv-chip"
+            title={ex.prompt}
+          >
+            {ex.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+
   const promptPanel = (
-    <div className={heroLayout ? "space-y-3" : "space-y-4"}>
+    <div className={heroLayout ? "space-y-4" : "space-y-4"}>
       {!walletConnected && (
         <p
           className={
@@ -738,7 +757,7 @@ export default function CodegenStudio({ onChatActive, heroLayout = false }: Prop
             value={prompt}
             disabled={!walletConnected}
             onChange={(e) => setPrompt(e.target.value)}
-            className="fgv-hero-textarea min-h-[108px] sm:min-h-[124px]"
+            className="fgv-hero-textarea min-h-[124px] sm:min-h-[148px]"
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
                 e.preventDefault();
@@ -746,26 +765,6 @@ export default function CodegenStudio({ onChatActive, heroLayout = false }: Prop
               }
             }}
           />
-          {/* Suggestions live inside the composer and step aside once there's
-              something to read, so an empty box is never just empty space. */}
-          {prompt.trim().length === 0 && (
-            <div className="border-t border-border px-2 pb-2 pt-2.5">
-              <p className="fgv-mono-label px-2 pb-1">{dict.hero.examplesLabel}</p>
-              {dict.hero.examples.slice(0, 3).map((ex) => (
-                <button
-                  key={ex}
-                  type="button"
-                  disabled={!walletConnected}
-                  onClick={() => setPrompt(ex)}
-                  className="group flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-[0.8rem] text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
-                >
-                  <Sparkles className="size-3 shrink-0 text-muted-foreground/40 group-hover:text-primary" />
-                  <span className="truncate">{ex}</span>
-                  <ArrowUpRight className="ml-auto size-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-50" />
-                </button>
-              ))}
-            </div>
-          )}
           <div className="flex items-center justify-between gap-3 border-t border-border px-4 py-3">
             <span className="fgv-mono-label">
               {prompt.trim().length > 0 ? `${prompt.trim().length} characters` : ""}
@@ -809,16 +808,7 @@ export default function CodegenStudio({ onChatActive, heroLayout = false }: Prop
           </div>
         </>
       )}
-      {/* In the hero the examples sit inside the composer instead. */}
-      {!heroLayout && (
-        <div className="flex flex-wrap gap-2">
-          {dict.hero.examples.map((ex) => (
-            <button key={ex} type="button" disabled={!walletConnected} onClick={() => setPrompt(ex)} className="fgv-chip">
-              {ex.length > 30 ? `${ex.slice(0, 30)}…` : ex}
-            </button>
-          ))}
-        </div>
-      )}
+      {exampleChips}
       {error && <p className="text-xs text-destructive">{error}</p>}
     </div>
   );
@@ -891,21 +881,10 @@ export default function CodegenStudio({ onChatActive, heroLayout = false }: Prop
         */}
         <section className="relative mb-0 flex h-screen w-full flex-col overflow-hidden">
           <HeroBackdrop />
-          {/*
-            Centred in the space above the pillar row. Sitting the content higher
-            (as the reference sites do) only works when a figure fills the band
-            underneath it; with nothing there it just reads as a dead gap.
-          */}
+          {/* One centred composition — headline, composer, try-an-idea chips.
+              No FIG grid under the fold; Linear keeps the first screen to that. */}
           <div className="relative z-10 mx-auto flex w-full max-w-[1200px] flex-1 items-center justify-center px-4 pt-14 sm:px-6 lg:px-8">
-            {/* One centred column: headline, then the composer directly under it,
-                so the whole fold has a single axis instead of a left/right split. */}
             <div className="w-full max-w-[820px] py-4">
-              {/*
-                Two-tone headline: the statement in full-contrast white, then the
-                explanation continuing inline at the SAME size in dim gray. That
-                single device is what makes the reference pages read the way they
-                do — a smaller grey paragraph underneath does not.
-              */}
               <h1 className="text-center font-display text-[clamp(1.55rem,1.7vw+2vh,3.1rem)] font-semibold leading-[1.12] tracking-[-0.03em]">
                 <span className="fgv-kinetic-line text-foreground">
                   {dict.hero.headlineLine1} {dict.hero.headlineLine2}.
@@ -913,32 +892,10 @@ export default function CodegenStudio({ onChatActive, heroLayout = false }: Prop
                 <span className="fgv-kinetic-line text-muted-foreground">{dict.hero.headlineDim}</span>
               </h1>
 
-              <div className="mx-auto mt-7 w-full">
+              <div className="mx-auto mt-8 w-full">
                 {promptPanel}
-                <p className="mt-3 text-center text-[11px] text-muted-foreground/60">{dict.hero.trustLine}</p>
+                <p className="mt-4 text-center text-[11px] text-muted-foreground/55">{dict.hero.trustLine}</p>
               </div>
-            </div>
-          </div>
-
-          {/* Hairline-divided pillars closing the fold. Needs both the width to
-              sit them side by side and the height to fit them, otherwise the
-              fold would clip them mid-sentence. */}
-          <div className="relative z-10 hidden shrink-0 border-t border-border [@media(min-width:640px)_and_(min-height:760px)]:block">
-            <div className="mx-auto grid w-full max-w-[1200px] grid-cols-1 sm:grid-cols-3">
-              {dict.hero.pillars.map((p, i) => (
-                <div
-                  key={p.title}
-                  className={
-                    i === 0
-                      ? "px-4 py-5 sm:px-6 lg:px-8"
-                      : "border-border px-4 py-5 sm:border-l sm:px-6 lg:px-8"
-                  }
-                >
-                  <p className="fgv-mono-label">{p.label}</p>
-                  <p className="mt-3 text-[0.8rem] font-medium text-foreground">{p.title}</p>
-                  <p className="mt-1 text-[0.75rem] leading-relaxed text-muted-foreground">{p.body}</p>
-                </div>
-              ))}
             </div>
           </div>
         </section>
