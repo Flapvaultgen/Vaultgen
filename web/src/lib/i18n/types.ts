@@ -26,11 +26,8 @@ export interface Dictionary {
   hero: {
     headlineLine1: string;
     headlineLine2: string;
-    withWord: string;
-    accentWord: string;
     /** Dim continuation of the headline, set at the same size (two-tone headline). */
     headlineDim: string;
-    subtitle: string;
     walletNotice: string;
     placeholderConnected: string;
     placeholderDisconnected: string;

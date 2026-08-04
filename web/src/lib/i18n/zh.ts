@@ -29,14 +29,9 @@ export const zh: Dictionary = {
   hero: {
     headlineLine1: "用简单的语言描述",
     headlineLine2: "你想要的金库机制",
-    withWord: "— ",
-    accentWord: "Flap Vault Gen",
-    headlineDim: "Flap Vault Gen 会规划机制、编写 Solidity、做分叉测试，并告诉你它能否上线。",
-    subtitle:
-      "规划 → 可行性判断 → 生成 Solidity → 编译 → 安全扫描 → 分叉测试 → 顾问式审计。没有固定模板 — 只要符合 Flap 001–009 号规则的机制都可以生成。",
+    headlineDim: "它会规划机制、编写 Solidity，并在上线前做分叉测试。",
     walletNotice: "请先连接钱包，才能描述并生成金库。",
-    placeholderConnected:
-      "用中文或英文描述任意符合 Flap 规则的金库机制 — 参与者、资金池、操作、分配方式。AI 会先规划，再生成 Solidity 代码、测试它，并告诉你是否已可上线，还是仅为草案。",
+    placeholderConnected: "用中文或英文描述你的金库机制 — 谁能做什么，交易手续费流向哪里…",
     placeholderDisconnected: "请先在上方连接钱包…",
     examplesLabel: "试试这些想法",
     generate: "生成 Solidity",
@@ -53,7 +48,7 @@ export const zh: Dictionary = {
       {
         label: "图 0.1",
         title: "没有模板",
-        body: "机制完全根据你自己的描述生成，而不是从固定的金库类型里挑选。",
+        body: "没有金库模板：机制完全根据你自己的描述生成，而不是从固定类型里挑选。",
       },
       {
         label: "图 0.2",
@@ -63,7 +58,7 @@ export const zh: Dictionary = {
       {
         label: "图 0.3",
         title: "审阅后交给你",
-        body: "Flap 规则审计和经济性审阅结果会展示给你，然后你在这里直接部署。",
+        body: "Flap 规则审计和经济性审阅结果会展示给你 — 每次生成的结果要么可以上线，要么只作为草案。",
       },
     ],
   },

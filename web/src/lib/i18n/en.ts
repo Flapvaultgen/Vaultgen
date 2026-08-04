@@ -32,14 +32,9 @@ export const en: Dictionary = {
   hero: {
     headlineLine1: "Describe a vault",
     headlineLine2: "mechanic in plain words",
-    withWord: "with ",
-    accentWord: "Flap Vault Gen.",
-    headlineDim: "Flap Vault Gen plans it, writes the Solidity, tests it on a chain fork, and tells you if it can launch.",
-    subtitle:
-      "Plan → scope → Solidity → compile → safety scan → fork tests → advisory audit. No vault templates — any mechanic that fits Flap Rules 001–009.",
+    headlineDim: "It plans the mechanic, writes the Solidity, and fork-tests it before you launch.",
     walletNotice: "Connect your wallet to describe and generate a vault.",
-    placeholderConnected:
-      "Describe any Flap-compatible vault mechanic — actors, buckets, actions, payouts. Write in English or 中文. The AI plans it, generates Solidity, tests it, and tells you if it's launch-ready or draft-only.",
+    placeholderConnected: "Describe your vault mechanic — who does what, and where the trading fees go…",
     placeholderDisconnected: "Connect your wallet above to get started…",
     examplesLabel: "Try an idea",
     generate: "Generate Solidity",
@@ -56,7 +51,7 @@ export const en: Dictionary = {
       {
         label: "Fig 0.1",
         title: "No templates",
-        body: "Your mechanic is built from your own description, not picked from a menu of vault types.",
+        body: "There are no vault templates: your mechanic is built from your own description, not picked from a menu.",
       },
       {
         label: "Fig 0.2",
@@ -66,7 +61,7 @@ export const en: Dictionary = {
       {
         label: "Fig 0.3",
         title: "Reviewed, then yours",
-        body: "A Flap spec audit and an economic review are shown to you, then you deploy from here.",
+        body: "A Flap spec audit and an economic review are shown to you — every run ends launch-ready or draft-only.",
       },
     ],
   },

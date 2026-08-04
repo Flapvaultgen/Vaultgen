@@ -14,6 +14,7 @@ import {
   Info,
   Ban,
   Wallet,
+  ArrowUpRight,
 } from "lucide-react";
 import { useAccount } from "wagmi";
 import {
@@ -730,16 +731,14 @@ export default function CodegenStudio({ onChatActive, heroLayout = false }: Prop
         </p>
       )}
       {heroLayout ? (
-        <div className="fgv-composer">
+        <div className="fgv-composer text-left">
           <Textarea
-            rows={5}
+            rows={4}
             placeholder={walletConnected ? dict.hero.placeholderConnected : dict.hero.placeholderDisconnected}
             value={prompt}
             disabled={!walletConnected}
             onChange={(e) => setPrompt(e.target.value)}
-            /* Shorter on phones so the composer footer and example pills still
-               fit inside the non-scrolling fold. */
-            className="fgv-hero-textarea min-h-[150px] sm:min-h-[210px]"
+            className="fgv-hero-textarea min-h-[108px] sm:min-h-[124px]"
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
                 e.preventDefault();
@@ -747,9 +746,29 @@ export default function CodegenStudio({ onChatActive, heroLayout = false }: Prop
               }
             }}
           />
+          {/* Suggestions live inside the composer and step aside once there's
+              something to read, so an empty box is never just empty space. */}
+          {prompt.trim().length === 0 && (
+            <div className="border-t border-border px-2 pb-2 pt-2.5">
+              <p className="fgv-mono-label px-2 pb-1">{dict.hero.examplesLabel}</p>
+              {dict.hero.examples.slice(0, 3).map((ex) => (
+                <button
+                  key={ex}
+                  type="button"
+                  disabled={!walletConnected}
+                  onClick={() => setPrompt(ex)}
+                  className="group flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-[0.8rem] text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
+                >
+                  <Sparkles className="size-3 shrink-0 text-muted-foreground/40 group-hover:text-primary" />
+                  <span className="truncate">{ex}</span>
+                  <ArrowUpRight className="ml-auto size-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-50" />
+                </button>
+              ))}
+            </div>
+          )}
           <div className="flex items-center justify-between gap-3 border-t border-border px-4 py-3">
             <span className="fgv-mono-label">
-              {prompt.trim().length > 0 ? `${prompt.trim().length} chars` : "Describe your mechanic"}
+              {prompt.trim().length > 0 ? `${prompt.trim().length} characters` : ""}
             </span>
             <div className="flex items-center gap-3">
               <kbd className="hidden font-mono text-[10px] text-muted-foreground/70 sm:inline">⌘↵</kbd>
@@ -790,20 +809,16 @@ export default function CodegenStudio({ onChatActive, heroLayout = false }: Prop
           </div>
         </>
       )}
-      <div
-        className={
-          heroLayout ? "flex flex-wrap items-center justify-center gap-1.5" : "flex flex-wrap gap-2"
-        }
-      >
-        {heroLayout && <span className="fgv-mono-label mr-1">{dict.hero.examplesLabel}</span>}
-        {/* Kept to three short pills in the hero: a long list wraps into a
-            column and reads as clutter next to the composer. */}
-        {(heroLayout ? dict.hero.examples.slice(0, 3) : dict.hero.examples).map((ex) => (
-          <button key={ex} type="button" disabled={!walletConnected} onClick={() => setPrompt(ex)} className="fgv-chip">
-            {ex.length > 30 ? `${ex.slice(0, 30)}…` : ex}
-          </button>
-        ))}
-      </div>
+      {/* In the hero the examples sit inside the composer instead. */}
+      {!heroLayout && (
+        <div className="flex flex-wrap gap-2">
+          {dict.hero.examples.map((ex) => (
+            <button key={ex} type="button" disabled={!walletConnected} onClick={() => setPrompt(ex)} className="fgv-chip">
+              {ex.length > 30 ? `${ex.slice(0, 30)}…` : ex}
+            </button>
+          ))}
+        </div>
+      )}
       {error && <p className="text-xs text-destructive">{error}</p>}
     </div>
   );
