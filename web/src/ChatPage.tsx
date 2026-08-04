@@ -263,6 +263,17 @@ export default function ChatPage({ chatId }: Props) {
           case "code_delta":
             setLiveCode((c) => c + String(ev.payload?.delta ?? ""));
             break;
+          case "status": {
+            // Each rewrite pass streams a whole new contract. Without dropping
+            // the previous pass here the viewer shows every draft concatenated
+            // (six passes looked like one 1,700-line contract).
+            if (ev.payload?.codeReset) setLiveCode("");
+            const ms = milestoneForEvent(ev);
+            if (ms) setActiveMilestone((prev) => advanceMilestone(prev, ms));
+            const statusLine = progressLineFor(ev, dict.chatPage.progress);
+            if (statusLine) setProgress(statusLine);
+            break;
+          }
           case "run_completed": {
             const r = ev.payload?.result as CodegenResult | undefined;
             if (r) {
