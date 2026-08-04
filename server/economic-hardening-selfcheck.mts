@@ -307,8 +307,14 @@ check("economic-critic.ts passes through the caller's model to chat.completions.
 
 const codegenSource = await readFile(path.join(SERVER_DIR, "codegen.ts"), "utf8");
 check(
-  "codegen.ts wires the critic pass with the pipeline apiKey and the advisory (cheap) model",
-  /runEconomicCriticPass\(contractName, fullSource, mechanicSpec, apiKey, advisoryModel\)/.test(codegenSource)
+  "codegen.ts wires the critic pass with the pipeline apiKey and the routed critic model",
+  /runEconomicCriticPass\(contractName, fullSource, mechanicSpec, apiKey, criticModel\)/.test(codegenSource)
+);
+check(
+  "the critic model is the cheap advisory one unless the vault pools BNB it owes to users",
+  /criticModel =\s*\n?\s*fullSource && ledgerWarrantsStrongCritic\(fullSource\) \? \(resolveEscalationModel\(\) \?\? model\) : advisoryModel/.test(
+    codegenSource
+  )
 );
 check(
   "codegen.ts resolves the advisory model via resolveCheapModel (falls back to the main model)",

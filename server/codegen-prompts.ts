@@ -312,6 +312,16 @@ BUCKET ACCOUNTING — when using the named buckets from the MechanicSpec:
 - NEVER pay oracle fees or payouts from undifferentiated address(this).balance while bucket counters
   still show funds — deduct from the correct bucket before the external call.
 - NEVER use require(address(this).balance >= X) for bucket-funded actions without syncing buckets.
+- WHAT A BUCKET ALREADY OWES MUST STAY VISIBLE. The moment you credit a per-user claimable from a
+  bucket, do ONE of these two things — never neither:
+    (a) debit the bucket right there:  rewardBucket -= amount; claimable[user] += amount;
+    (b) increment an aggregate:        totalOwedToUsers += amount;  and subtract that aggregate from
+        the bucket in EVERY availability computation (e.g. rewardBucket - reserved - totalOwedToUsers).
+  If you reserve budget up front and then release the reservation when a user is approved, the amount
+  stops counting as reserved at the exact moment it starts being owed — with nothing tracking it in
+  between, the same BNB backs two promises and whoever claims last reverts. Expose the aggregate as a
+  view in vaultUISchema so users can check solvency themselves.
+
 CONDITIONAL GUIDANCE — apply ONLY the sections the MechanicSpec actually needs. Check its actions,
 oracleActions, scheduledActions, payoutRules, fundsIn, and ruleAnalysis; do not add machinery the
 spec does not ask for.

@@ -47,9 +47,11 @@ server/            Node.js AI pipeline + HTTP API (tsx / ESM)
   mechanic-spec.ts        — MechanicSpec planner (the authoritative product plan)
   vault-scope.ts          — scope verdict (launch_ready / draft_only / out_of_scope)
   mechanic-completeness.ts — structural UI/mechanic scanners
+  money-flow.ts           — money-variable ledger: blocking solvency rule + critic evidence
   test-gen.ts             — AI-generated fork integration tests
   spec-audit.ts           — advisory 9-rule Flap spec audit
   economic-critic.ts      — advisory payout fairness review
+  fixtures/               — real generated vaults kept as regression corpus
   ui-gen.ts               — AI-generated React vault UI component package
   chat-store.ts           — Supabase-backed persistence (in-memory fallback)
   chat-routes.ts          — HTTP API routes (chat, run, artifact, launched-token)
@@ -135,6 +137,8 @@ Before any code is generated, the studio classifies whether the idea fits Flap's
 | Cost tracking | Per-run token usage and estimated USD cost logged for every AI call |
 | Pass budget | A repair pass rewrites the whole contract, so the loop escalates to a surgical patch the moment a rule blocks twice, and abandons a rule (or an identical fork-test failure) after 3 passes instead of spending the full budget on a loop that is not converging |
 | Run timing | Every pass logs its phases (`[codegen-timing] pass 3: … llm 48.2s · compile 7.1s · forktest 39.4s`), so a slow run points at its own bottleneck |
+| Ledger solvency | Every write to every money variable is extracted deterministically, which turns "does the money add up?" into arithmetic: crediting a per-user claimable without debiting its bucket (or tracking an aggregate the availability math subtracts) blocks the run, and the same table goes to the critic as a proof obligation instead of a spot-the-bug request. Vaults that pool BNB they owe to users get the stronger model for that pass |
+| Regression corpus | Generated vaults that turned out to be broken are kept verbatim under `server/fixtures/` with their expected findings, so scanner and prompt changes are measured against real bugs rather than judged by feel |
 
 ---
 

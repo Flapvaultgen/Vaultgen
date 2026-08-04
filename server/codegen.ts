@@ -29,12 +29,17 @@ import {
   type MechanicSpec,
 } from "./mechanic-spec.js";
 import { scanMechanicCompleteness } from "./mechanic-completeness.js";
+import { buildMoneyFlowTable, scanLedgerSolvency } from "./money-flow.js";
 import {
   designQuestionGate,
   applyConservativeLifecycleDefaults,
   type DesignQuestion,
 } from "./design-questions.js";
-import { runEconomicCriticPass, type EconomicCriticReport } from "./economic-critic.js";
+import {
+  runEconomicCriticPass,
+  ledgerWarrantsStrongCritic,
+  type EconomicCriticReport,
+} from "./economic-critic.js";
 import {
   MAX_CRITIC_REPAIR_ATTEMPTS,
   buildCriticRepairPrompt,
@@ -1723,6 +1728,14 @@ export function scanSafety(
     if (findings.some((f) => f.rule === mf.rule)) continue;
     add(mf.level ?? "block", mf.rule, mf.detail);
   }
+
+  // Ledger solvency: cross-function arithmetic on the money variables. A vault
+  // can pass every check above and still promise the same BNB twice.
+  for (const lf of scanLedgerSolvency(buildMoneyFlowTable(source))) {
+    if (findings.some((f) => f.rule === lf.rule)) continue;
+    add(lf.level ?? "block", lf.rule, lf.detail);
+  }
+
   const level: SafetyLevel = findings.some((f) => f.level === "block")
     ? "fail"
     : findings.length
@@ -2819,16 +2832,26 @@ async function runCodegenPipeline(opts: {
   if (!fullSource && code) fullSource = `${PREAMBLE}\n${code.trim()}\n`;
 
   // Phase 7: advisory tail — the spec pre-audit and the economic critic are
-  // independent cheap-model reads of the same final source, so they run
-  // concurrently. Both are advisory: they never block the pipeline and never
-  // override scanSafety/integration results.
+  // independent reads of the same final source, so they run concurrently. Both
+  // are advisory: they never block the pipeline and never override
+  // scanSafety/integration results.
+  //
+  // The critic escalates to the stronger model when the vault pools BNB and owes
+  // per-user amounts out of it. That is the shape where the failure mode is
+  // insolvency rather than an untidy mechanic, and where the cheap model reads
+  // the ledger without adding it up.
+  // AI_ESCALATION_MODEL is optional, so fall back to the primary codegen model
+  // rather than the cheap advisory one — the point is to stop reading the ledger
+  // without adding it up.
+  const criticModel =
+    fullSource && ledgerWarrantsStrongCritic(fullSource) ? (resolveEscalationModel() ?? model) : advisoryModel;
   let economicCritique: EconomicCriticReport | null = null;
   if (ok && safety.level !== "fail" && fullSource) {
     // Timed individually rather than as one block: they run concurrently, so a
     // single wrapper would hide which of the two is the slow one.
     const [, critique] = await Promise.all([
       runAuditIfReady(),
-      timed("critic", () => runEconomicCriticPass(contractName, fullSource, mechanicSpec, apiKey, advisoryModel)),
+      timed("critic", () => runEconomicCriticPass(contractName, fullSource, mechanicSpec, apiKey, criticModel)),
     ]);
     economicCritique = critique;
     emit?.({ type: "economic_critique", report: economicCritique });
@@ -3045,7 +3068,7 @@ async function runCodegenPipeline(opts: {
       // Rerun the critic on the accepted repaired code so the loop (and the
       // final report) reflect the new state.
       economicCritique = await timed("critic", () =>
-        runEconomicCriticPass(contractName, fullSource, mechanicSpec, apiKey, advisoryModel)
+        runEconomicCriticPass(contractName, fullSource, mechanicSpec, apiKey, criticModel)
       );
       emit?.({ type: "economic_critique", report: economicCritique });
       attemptRecord.criticResult = shouldTriggerCriticRepair(economicCritique) ? "findings_remain" : "clean";
@@ -3443,12 +3466,13 @@ function safetyFixPrompt(
     ? `\nFor missing write/trigger methods: any external user action or mechanism trigger (advance*, execute*, request*, etc.) MUST appear in vaultUISchema.methods (isWriteMethod=true) — including onlyManager triggers so users see the mechanism exists.\n`
     : "";
   const economicPayoutHint = blocking.some((f) =>
-    /first-claimer-can-drain-shared-pool|approval-without-reserved-liability|claim-amount-from-global-bucket-without-winner-semantics|multi-user-payout-without-per-user-accounting|approval-not-linked-to-submitted-state|event-only-user-action-without-trust-disclosure/.test(
+    /first-claimer-can-drain-shared-pool|approval-without-reserved-liability|bucket-liability-not-tracked|claim-amount-from-global-bucket-without-winner-semantics|multi-user-payout-without-per-user-accounting|approval-not-linked-to-submitted-state|event-only-user-action-without-trust-disclosure/.test(
       f.rule
     )
   )
     ? `\nFor economic/multi-user payout issues (Phase 7):
 - Do NOT pay the full shared bucket to whichever eligible address claims first — add a per-user liability mapping (e.g. mapping(address => uint256) public claimableRewards) and pay only claimableRewards[msg.sender].
+- Keep the bucket's FREE balance honest: crediting claimableRewards[user] must either debit the funding bucket in the same statement, or increment an aggregate (e.g. uint256 public totalOwedToUsers) that EVERY availability computation subtracts. Never release a reservation counter at approval time without one of those — that lets the same BNB back a second promise, and the last claimer reverts.
 - Reserve/credit the reward amount at approval/eligibility time, not at claim time: e.g. \`rewardBucket -= amount; claimableRewards[user] += amount;\` inside the manager approval function.
 - Make approval consume or reference the submitted state (e.g. store latestProofHash[user] = keccak256(proof) on submission and check it in approval), or explicitly disclose in description()/vaultUISchema that review is off-chain from event logs.
 - Only pay the entire bucket to a single caller when the mechanic is genuinely winner-takes-all — in that case say so explicitly in description() and never leave a per-user eligibility mapping that implies more than one recipient.

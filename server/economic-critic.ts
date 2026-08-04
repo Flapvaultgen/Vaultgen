@@ -19,6 +19,7 @@
  */
 import type { MechanicSpec } from "./mechanic-spec.js";
 import { FLAP_RULE_IDS, formatRuleLabel, type FlapRuleId } from "./constitution.js";
+import { buildMoneyFlowTable, formatMoneyFlowTable, hasNontrivialLedger } from "./money-flow.js";
 
 export type CriticSeverity = "blocking" | "high" | "medium" | "low";
 
@@ -56,6 +57,9 @@ export const CRITIC_CHECKLIST: string[] = [
   "manager can mark completion/approval without the required user submission existing on-chain",
   "multiple users can accept a single-assignee resource (no assignee/status enforcement on accept)",
   "deactivating a shared resource traps other assigned users' per-user state",
+  // Solvency: the arithmetic across functions, not any single suspicious line.
+  "a bucket's free/available balance is computed without subtracting everything already owed (per-user claimables included), so the same BNB can be promised twice",
+  "an amount stops being counted as reserved at the moment it becomes owed to a user, with nothing tracking it in between",
   "missing user status views: the user cannot see whether they are eligible, assigned, or able to claim (and how much)",
   "description() says 'holders' but the code never checks holder eligibility",
   "hardcoded reward constants not derived from the MechanicSpec (an amount the user never chose)",
@@ -64,8 +68,40 @@ export const CRITIC_CHECKLIST: string[] = [
   "any other mismatch between the MechanicSpec's stated economics and what the Solidity actually does",
 ];
 
-function buildEconomicCriticPrompt(contractName: string, spec: MechanicSpec): string {
+/**
+ * The obligation that turns "read this and spot the bug" into "check this
+ * arithmetic". A vault can match none of the known bad shapes and still be
+ * insolvent, because solvency is a property of every write to every money
+ * variable at once. The ledger is extracted deterministically (money-flow.ts) so
+ * the model spends its budget verifying rather than transcribing.
+ *
+ * The `solvency` array in the response is a required scratchpad, not data we
+ * consume: forcing the per-bucket enumeration is what makes the model actually
+ * do the addition instead of pattern-matching. Do not "optimise" it away.
+ */
+function buildSolvencyObligation(ledger: string): string {
+  return `${ledger}
+
+PROOF OBLIGATION — you MUST work through this before writing any finding:
+For EACH native bucket in the ledger above:
+  a. List every claim on it: aggregate counters that reserve it, AND every per-user
+     liability mapping that is credited from it.
+  b. Using the writes table, check the identity: after ANY sequence of calls,
+     sum(all claims on the bucket) <= bucket.
+  c. A function that credits a per-user liability MUST do one of two things, or the
+     identity breaks: debit the bucket right there, or increment an aggregate that
+     EVERY free-balance expression subtracts. Check which one it does. "There is a
+     claimable mapping" is NOT sufficient — do the arithmetic.
+  d. If a free-balance expression omits a claim, give the concrete call sequence
+     that leaves a user unable to be paid, and report it as "blocking".
+Treating an amount as reserved and then releasing that reservation at the moment it
+becomes owed to a user — without anything else tracking it — always breaks the
+identity. Look specifically for that.`;
+}
+
+function buildEconomicCriticPrompt(contractName: string, spec: MechanicSpec, ledger?: string): string {
   const checklist = CRITIC_CHECKLIST.map((c, i) => `${i + 1}. ${c}`).join("\n");
+  const solvency = ledger ? `\n\n${buildSolvencyObligation(ledger)}` : "";
   const applicableRules = FLAP_RULE_IDS.filter((id) => spec.ruleAnalysis[id]?.applies).map((id) => formatRuleLabel(id));
   return `You are the ECONOMIC CRITIC for Flap Vault Gen. Deterministic scanners already caught structural bugs
 (missing base, unsafe receive(), custom errors, ...). Your job is different: read the generated Solidity for
@@ -76,7 +112,7 @@ You do NOT block generation and you do NOT replace the deterministic scanners. Y
 that a human (or the repair loop) can act on. Be concrete: cite the exact function/mapping involved.
 
 Checklist — look specifically for:
-${checklist}
+${checklist}${solvency}
 
 MechanicSpec (authoritative product plan — judge the code against THIS, not a generic template):
 ${JSON.stringify(
@@ -100,6 +136,15 @@ Applicable Flap rules for this mechanic: ${applicableRules.join(", ") || "Rules 
 Return ONLY JSON with this shape:
 {
   "summary": "one short paragraph: is the mechanic's economics honest and fair as implemented?",
+  "solvency": [
+    {
+      "bucket": "bucket variable name",
+      "claims": ["every counter and per-user mapping that has a claim on it"],
+      "creditSites": ["function -> does it debit the bucket, increment a tracked aggregate, or neither?"],
+      "verdict": "sound|unsound",
+      "worstCaseSequence": "if unsound: the call sequence that leaves a user unpaid"
+    }
+  ],
   "findings": [
     {
       "severity": "blocking|high|medium|low",
@@ -110,6 +155,9 @@ Return ONLY JSON with this shape:
     }
   ]
 }
+
+Every bucket you mark "unsound" MUST have a matching "blocking" finding. Fill "solvency" for every
+bucket even when everything checks out — that enumeration is the work, not paperwork.
 
 If the mechanic is economically sound and matches its MechanicSpec, return an empty "findings" array.
 Use "blocking" severity ONLY for issues that let one user take funds owed to another eligible user, that
@@ -168,13 +216,14 @@ export async function runEconomicCriticPass(
   try {
     const { createAiClient } = await import("./ai-client.js");
     const client = createAiClient(apiKey);
+    const ledger = formatMoneyFlowTable(buildMoneyFlowTable(source));
     const completion = await client.chat.completions.create({
       model,
       temperature: 0.1,
       max_tokens: 8000,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: buildEconomicCriticPrompt(contractName, spec) },
+        { role: "system", content: buildEconomicCriticPrompt(contractName, spec, ledger) },
         { role: "user", content: source.slice(0, 60_000) },
       ],
     });
@@ -198,5 +247,16 @@ export async function runEconomicCriticPass(
   }
 }
 
+/**
+ * Whether this source deserves the stronger model for its critic pass: it holds
+ * pooled BNB and owes per-user amounts out of it, so a solvency mistake is the
+ * difference between a launchable vault and one that cannot pay its users. One
+ * stronger critic call costs a fraction of the rewrite passes a missed finding
+ * causes later, so the spend is targeted rather than across the board.
+ */
+export function ledgerWarrantsStrongCritic(source: string): boolean {
+  return hasNontrivialLedger(buildMoneyFlowTable(source));
+}
+
 /** Exported for prompt-content selfchecks. */
-export { buildEconomicCriticPrompt };
+export { buildEconomicCriticPrompt, buildSolvencyObligation };
