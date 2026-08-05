@@ -48,6 +48,10 @@ check(
 check("LAUNCH_PORTAL_ADDRESS is BSC testnet vault portal", LAUNCH_PORTAL_ADDRESS === "0x027e3704fC5C16522e9393d04C60A3ac5c0d775f");
 check("LAUNCH_CHAIN_ID is 97", LAUNCH_CHAIN_ID === 97);
 
+const networks = readFileSync(join(here, "../src/lib/flap-networks.ts"), "utf8");
+check("mainnet VaultPortal address wired", networks.includes("0x90497450f2a706f1951b5bdda52B4E5d16f34C06"));
+check("mainnet Tax Token V3 impl wired", networks.includes("0x024f18294970B5c76c0691b87f138A0317156422"));
+
 for (const errName of ["InvalidTaxRate", "VaultFactoryNotRegistered", "NotRegistered", "DeployFailed"]) {
   check(
     `portal/factory error ${errName} in ABI`,
@@ -185,6 +189,9 @@ check("launch uses registered vaultData mode", launchPanel.includes('vaultDataMo
 check("Launch debug section exists", launchPanel.includes("Launch debug"));
 check("launch panel has metadata fields (image/description/socials)", launchPanel.includes("uploadTokenMeta") && launchPanel.includes("tokenWebsite") && launchPanel.includes("tokenTwitter"));
 check("launch panel has dev buy field", launchPanel.includes("devBuyBnb"));
+check("launch panel has network toggle", launchPanel.includes("targetChainId") && launchPanel.includes("FLAP_BSC_MAINNET"));
+check("launch panel has mainnet confirmation gate", launchPanel.includes("mainnetGateOk") && launchPanel.includes("Mainnet confirmation required"));
+check("launch uses chain-aware launchCodegenToken", launchPanel.includes("launchCodegenToken"));
 
 const flapMeta = readFileSync(join(here, "../src/lib/flap-meta.ts"), "utf8");
 check("meta upload targets Flap's pinning API", flapMeta.includes("funcs.flap.sh/api/upload"));

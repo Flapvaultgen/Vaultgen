@@ -1,10 +1,7 @@
-/** BSC testnet Flap protocol addresses (from testnet.flap.sh chain config). */
-export const FLAP_BSC_TESTNET = {
-  chainId: 97,
-  portal: "0x5bEacaF7ABCbB3aB280e80D007FD31fcE26510e9" as const,
-  vaultPortal: "0x027e3704fC5C16522e9393d04C60A3ac5c0d775f" as const,
-  tokenImplTaxedV3: "0xE6Ff967a887084c16D0fD71548CF709542cc1557" as const,
-} as const;
+/**
+ * Backward-compatible re-exports. Prefer `flap-networks.ts` for new code.
+ */
+export { FLAP_BSC_TESTNET, FLAP_BSC_MAINNET, DEFAULT_LAUNCH_NETWORK } from "./flap-networks";
 
 /** Matches FlapBSCFixture defaults for V3 tax tokens. */
 export const FLAP_LAUNCH_DEFAULTS = {

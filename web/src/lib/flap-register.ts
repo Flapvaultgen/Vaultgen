@@ -1,17 +1,16 @@
 import type { Address, Hex } from "viem";
 import { getAccount, writeContract, waitForTransactionReceipt } from "wagmi/actions";
-import { bscTestnet } from "viem/chains";
-import { flapTestnetPublicClient } from "./flap-factory";
+import { flapPublicClient } from "./flap-networks";
+import type { FlapLaunchNetworkId } from "./flap-networks";
+import { DEFAULT_LAUNCH_NETWORK } from "./flap-networks";
 import { wagmiConfig } from "./wagmi";
 import {
   CODEGEN_FACTORY_REGISTER_ABI,
   checkRegisterPayload,
   creationBytecodeByteLength,
   decodeRegisterRevert,
-  isUsableCreationBytecode,
   registerVaultGasLimit,
   type RegisterCallContext,
-  MAX_REGISTER_INIT_CODE,
 } from "./register-validation";
 
 export {
@@ -51,22 +50,24 @@ export async function preflightRegisterVault(
   factoryAddress: Address,
   creationBytecode: string | null | undefined,
   vaultDescription: string,
-  account: Address
+  account: Address,
+  chainId: FlapLaunchNetworkId = DEFAULT_LAUNCH_NETWORK.chainId
 ): Promise<RegisterPreflightResult> {
   const issue = checkRegisterPayload(creationBytecode);
   if (issue) return { ok: false, reason: issue.message, errorName: null, raw: issue.code };
 
   const bytecode = creationBytecode as Hex;
   const gas = registerVaultGasLimit(bytecode);
+  const client = flapPublicClient(chainId);
   const ctx: RegisterCallContext = {
-    chainId: bscTestnet.id,
+    chainId,
     factoryAddress,
     wallet: account,
     bytecodeBytes: creationBytecodeByteLength(bytecode),
     descriptionLength: vaultDescription.length,
   };
   try {
-    await flapTestnetPublicClient.simulateContract({
+    await client.simulateContract({
       address: factoryAddress,
       abi: CODEGEN_FACTORY_REGISTER_ABI,
       functionName: "registerVault",
@@ -84,16 +85,21 @@ export async function preflightRegisterVault(
 export async function registerVaultForFlap(
   factoryAddress: Address,
   creationBytecode: Hex,
-  vaultDescription: string
+  vaultDescription: string,
+  chainId: FlapLaunchNetworkId = DEFAULT_LAUNCH_NETWORK.chainId
 ): Promise<Hex> {
   const account = getAccount(wagmiConfig);
   if (!account.address) {
     throw new Error("Connect MetaMask first.");
   }
 
-  // Preflight before the wallet prompt so the user never pays gas for an
-  // obviously-reverting transaction; failures carry the decoded reason.
-  const preflight = await preflightRegisterVault(factoryAddress, creationBytecode, vaultDescription, account.address);
+  const preflight = await preflightRegisterVault(
+    factoryAddress,
+    creationBytecode,
+    vaultDescription,
+    account.address,
+    chainId
+  );
   if (!preflight.ok) {
     throw new Error(preflight.reason);
   }
@@ -103,14 +109,14 @@ export async function registerVaultForFlap(
     abi: CODEGEN_FACTORY_REGISTER_ABI,
     functionName: "registerVault",
     args: [creationBytecode, vaultDescription],
-    chainId: bscTestnet.id,
+    chainId,
     account: account.address,
     gas: preflight.gasLimit,
   });
 
   const receipt = await waitForTransactionReceipt(wagmiConfig, {
     hash,
-    chainId: bscTestnet.id,
+    chainId,
   });
   if (receipt.status !== "success") {
     throw new Error("Register vault transaction reverted on-chain (see the tx on the explorer for details).");
@@ -120,16 +126,18 @@ export async function registerVaultForFlap(
 
 export async function readRegisteredVault(
   factoryAddress: Address,
-  launcher: Address
+  launcher: Address,
+  chainId: FlapLaunchNetworkId = DEFAULT_LAUNCH_NETWORK.chainId
 ): Promise<{ registered: boolean; description: string }> {
+  const client = flapPublicClient(chainId);
   const [registered, description] = await Promise.all([
-    flapTestnetPublicClient.readContract({
+    client.readContract({
       address: factoryAddress,
       abi: CODEGEN_FACTORY_REGISTER_ABI,
       functionName: "hasRegisteredBytecode",
       args: [launcher],
     }),
-    flapTestnetPublicClient.readContract({
+    client.readContract({
       address: factoryAddress,
       abi: CODEGEN_FACTORY_REGISTER_ABI,
       functionName: "registeredVaultDescription",

@@ -1,3 +1,5 @@
+import { DEFAULT_LAUNCH_NETWORK, getFlapNetwork, type FlapLaunchNetworkId } from "./flap-networks";
+
 export type StudioConfig = {
   factoryAddress?: string;
   sandboxDeployer?: string;
@@ -5,8 +7,10 @@ export type StudioConfig = {
   flapLaunch?: string;
   apiUrl?: string;
   bscTestnetExplorer?: string;
+  bscMainnetExplorer?: string;
   bscTestnetFaucet?: string;
   flapTestnet?: string;
+  flapMainnet?: string;
 };
 
 let cached: StudioConfig | null = null;
@@ -33,9 +37,12 @@ export function getConfiguredFactoryAddress(config: StudioConfig): `0x${string}`
 }
 
 /** This browser's locally cached factory address only — never the config override. */
-export function getCachedFactoryAddress(): `0x${string}` | null {
+export function getCachedFactoryAddress(
+  chainId: FlapLaunchNetworkId = DEFAULT_LAUNCH_NETWORK.chainId
+): `0x${string}` | null {
   if (typeof localStorage === "undefined") return null;
-  const fromLs = (localStorage.getItem("flapVaultGen.codegenFactory.bscTestnet") ?? "").trim();
+  const key = getFlapNetwork(chainId).factoryStorageKey;
+  const fromLs = (localStorage.getItem(key) ?? "").trim();
   return /^0x[a-fA-F0-9]{40}$/.test(fromLs) ? (fromLs as `0x${string}`) : null;
 }
 
@@ -49,19 +56,37 @@ export function getCodegenFactoryAddress(config: StudioConfig): `0x${string}` | 
   return getConfiguredFactoryAddress(config) ?? getCachedFactoryAddress();
 }
 
-export function saveCodegenFactoryAddress(address: `0x${string}`, artifactFingerprint: string): void {
-  localStorage.setItem("flapVaultGen.codegenFactory.bscTestnet", address);
-  localStorage.setItem("flapVaultGen.codegenFactory.artifactFp", artifactFingerprint);
+export function saveCodegenFactoryAddress(
+  address: `0x${string}`,
+  artifactFingerprint: string,
+  chainId: FlapLaunchNetworkId = DEFAULT_LAUNCH_NETWORK.chainId
+): void {
+  const key = getFlapNetwork(chainId).factoryStorageKey;
+  localStorage.setItem(key, address);
+  localStorage.setItem(`${key}.artifactFp`, artifactFingerprint);
 }
 
-export function getStoredFactoryArtifactFingerprint(): string | null {
+export function getStoredFactoryArtifactFingerprint(
+  chainId: FlapLaunchNetworkId = DEFAULT_LAUNCH_NETWORK.chainId
+): string | null {
   if (typeof localStorage === "undefined") return null;
-  return localStorage.getItem("flapVaultGen.codegenFactory.artifactFp");
+  const key = getFlapNetwork(chainId).factoryStorageKey;
+  return (
+    localStorage.getItem(`${key}.artifactFp`) ??
+    // Legacy single-key fingerprint (pre-mainnet) — only for testnet.
+    (chainId === 97 ? localStorage.getItem("flapVaultGen.codegenFactory.artifactFp") : null)
+  );
 }
 
-export function clearCodegenFactoryAddress(): void {
-  localStorage.removeItem("flapVaultGen.codegenFactory.bscTestnet");
-  localStorage.removeItem("flapVaultGen.codegenFactory.artifactFp");
+export function clearCodegenFactoryAddress(
+  chainId: FlapLaunchNetworkId = DEFAULT_LAUNCH_NETWORK.chainId
+): void {
+  const key = getFlapNetwork(chainId).factoryStorageKey;
+  localStorage.removeItem(key);
+  localStorage.removeItem(`${key}.artifactFp`);
+  if (chainId === 97) {
+    localStorage.removeItem("flapVaultGen.codegenFactory.artifactFp");
+  }
 }
 
 export function saveVaultBytecode(contractName: string, bytecode: string): void {
@@ -113,6 +138,23 @@ export function getSandboxDeployerAddress(config: StudioConfig): `0x${string}` |
   const raw = (config.sandboxDeployer ?? import.meta.env.VITE_SANDBOX_DEPLOYER ?? "").trim();
   if (!/^0x[a-fA-F0-9]{40}$/.test(raw)) return null;
   return raw as `0x${string}`;
+}
+
+export function explorerBaseForChain(
+  config: StudioConfig | null | undefined,
+  chainId: number
+): string {
+  if (chainId === 56) {
+    return (config?.bscMainnetExplorer ?? getFlapNetwork(56).explorerBase).replace(/\/$/, "");
+  }
+  return (config?.bscTestnetExplorer ?? DEFAULT_LAUNCH_NETWORK.explorerBase).replace(/\/$/, "");
+}
+
+export function flapBaseForChain(config: StudioConfig | null | undefined, chainId: number): string {
+  if (chainId === 56) {
+    return (config?.flapMainnet ?? getFlapNetwork(56).flapBase).replace(/\/$/, "");
+  }
+  return (config?.flapTestnet ?? DEFAULT_LAUNCH_NETWORK.flapBase).replace(/\/$/, "");
 }
 
 export function explorerAddressUrl(explorerBase: string | undefined, address: string): string {

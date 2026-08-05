@@ -6,8 +6,13 @@ import {
   type PublicClient,
 } from "viem";
 import { getAccount, readContract, waitForTransactionReceipt, writeContract } from "wagmi/actions";
-import { flapTestnetPublicClient } from "./flap-factory";
-import { FLAP_BSC_TESTNET, FLAP_LAUNCH_DEFAULTS } from "./flap-testnet";
+import { FLAP_LAUNCH_DEFAULTS } from "./flap-testnet";
+import {
+  DEFAULT_LAUNCH_NETWORK,
+  flapPublicClient,
+  getFlapNetwork,
+  type FlapLaunchNetworkId,
+} from "./flap-networks";
 import {
   LAUNCH_CHAIN_ID,
   LAUNCH_FUNCTION_SIGNATURE,
@@ -18,6 +23,7 @@ import {
   decodeLaunchRevert,
   launchGasLimit,
   launchPayableValue,
+  launchPortalForChain,
   type LaunchCallContext,
   type LaunchValidationInput,
   type VaultDataMode,
@@ -35,6 +41,7 @@ export {
   decodeLaunchRevert,
   launchGasLimit,
   launchPayableValue,
+  launchPortalForChain,
   type LaunchCallContext,
   type VaultDataMode,
 } from "./launch-validation";
@@ -94,13 +101,11 @@ export function buildLaunchParams(input: LaunchTokenInput, salt: Hex) {
   return {
     name: input.name,
     symbol: input.symbol,
-    // IPFS CID pinned via Flap's upload API — flap.sh reads image/description/socials from it.
     meta: input.metaCid ?? "",
     dexThresh: FLAP_LAUNCH_DEFAULTS.dexThresh,
     salt,
     migratorType: FLAP_LAUNCH_DEFAULTS.migratorType,
     quoteToken: "0x0000000000000000000000000000000000000000" as Address,
-    // Initial dev buy: portal spends msg.value (>= quoteAmt) buying the token at launch.
     quoteAmt: input.devBuyWei ?? FLAP_LAUNCH_DEFAULTS.quoteAmt,
     permitData: "0x" as Hex,
     extensionID: `0x${"0".repeat(64)}` as Hex,
@@ -147,9 +152,12 @@ function validationFromInput(input: LaunchTokenInput, wallet: Address, chainId: 
 export async function preflightLaunchToken(
   input: LaunchTokenInput,
   account: Address,
-  salt: Hex
+  salt: Hex,
+  chainId: FlapLaunchNetworkId = DEFAULT_LAUNCH_NETWORK.chainId
 ): Promise<LaunchPreflightResult> {
-  const issue = checkLaunchPayload(validationFromInput(input, account, LAUNCH_CHAIN_ID));
+  const net = getFlapNetwork(chainId);
+  const portal = net.vaultPortal;
+  const issue = checkLaunchPayload(validationFromInput(input, account, chainId));
   if (issue) return { ok: false, reason: issue.message, errorName: null, raw: issue.code };
 
   const params = buildLaunchParams(input, salt);
@@ -170,11 +178,12 @@ export async function preflightLaunchToken(
     registeredOnChain: input.registeredOnChain,
     devBuyWei: input.devBuyWei,
     metaCid: input.metaCid,
+    chainId,
   });
 
   try {
-    await flapTestnetPublicClient.simulateContract({
-      address: LAUNCH_PORTAL_ADDRESS,
+    await flapPublicClient(chainId).simulateContract({
+      address: portal,
       abi: VAULT_PORTAL_LAUNCH_ABI,
       functionName: "newTokenV6WithVault",
       args: [params],
@@ -182,11 +191,7 @@ export async function preflightLaunchToken(
       value: launchPayableValue(input.devBuyWei),
       gas: launchGasLimit(),
     });
-    const predictedToken = predictCloneAddress(
-      FLAP_BSC_TESTNET.tokenImplTaxedV3,
-      FLAP_BSC_TESTNET.portal,
-      salt
-    );
+    const predictedToken = predictCloneAddress(net.tokenImplTaxedV3, net.portal, salt);
     return { ok: true, gasLimit: launchGasLimit(), predictedToken };
   } catch (err) {
     const decoded = decodeLaunchRevert(err, ctx);
@@ -194,24 +199,30 @@ export async function preflightLaunchToken(
   }
 }
 
-export async function launchCodegenTokenOnTestnet(
+/** Launch a codegen vault token on BSC testnet or mainnet via VaultPortal. */
+export async function launchCodegenToken(
   input: LaunchTokenInput,
   opts?: {
     onProgress?: (message: string) => void;
     /** Pre-computed salt from preflight — skips re-search when provided. */
     salt?: Hex;
+    chainId?: FlapLaunchNetworkId;
   }
 ): Promise<LaunchTokenResult> {
+  const chainId = opts?.chainId ?? DEFAULT_LAUNCH_NETWORK.chainId;
+  const net = getFlapNetwork(chainId);
+  const portal = net.vaultPortal;
+
   const account = getAccount(wagmiConfig);
   if (!account.address) throw new Error("Connect MetaMask first.");
 
-  const issue = checkLaunchPayload(validationFromInput(input, account.address, LAUNCH_CHAIN_ID));
+  const issue = checkLaunchPayload(validationFromInput(input, account.address, chainId));
   if (issue) throw new Error(issue.message);
 
   opts?.onProgress?.("Finding vanity token address (…7777)…");
   const salt =
     opts?.salt ??
-    (await findVanity7777Salt(FLAP_BSC_TESTNET.tokenImplTaxedV3, FLAP_BSC_TESTNET.portal, (p) => {
+    (await findVanity7777Salt(net.tokenImplTaxedV3, net.portal, (p) => {
       if (p.attempts % 50_000 === 0) {
         opts?.onProgress?.(
           `Finding vanity address… ${p.attempts.toLocaleString()} tries (${Math.round(p.ratePerSec).toLocaleString()}/s)`
@@ -219,7 +230,7 @@ export async function launchCodegenTokenOnTestnet(
       }
     }));
 
-  const preflight = await preflightLaunchToken(input, account.address, salt);
+  const preflight = await preflightLaunchToken(input, account.address, salt, chainId);
   if (!preflight.ok) throw new Error(preflight.reason);
 
   const params = buildLaunchParams(input, salt);
@@ -240,17 +251,18 @@ export async function launchCodegenTokenOnTestnet(
     registeredOnChain: input.registeredOnChain,
     devBuyWei: input.devBuyWei,
     metaCid: input.metaCid,
+    chainId,
   });
 
   let hash: Hex;
   try {
     hash = await writeContract(wagmiConfig, {
-      address: LAUNCH_PORTAL_ADDRESS,
+      address: portal,
       abi: VAULT_PORTAL_LAUNCH_ABI,
       functionName: "newTokenV6WithVault",
       args: [params],
       value: launchPayableValue(input.devBuyWei),
-      chainId: LAUNCH_CHAIN_ID,
+      chainId,
       account: account.address,
       gas: preflight.gasLimit,
     });
@@ -261,7 +273,7 @@ export async function launchCodegenTokenOnTestnet(
   opts?.onProgress?.("Waiting for confirmation…");
   const receipt = await waitForTransactionReceipt(wagmiConfig, {
     hash,
-    chainId: LAUNCH_CHAIN_ID,
+    chainId,
   });
   if (receipt.status !== "success") {
     throw new Error("Launch transaction reverted on-chain (see the tx on the explorer for details).");
@@ -269,11 +281,11 @@ export async function launchCodegenTokenOnTestnet(
 
   const token = preflight.predictedToken;
   const info = await readContract(wagmiConfig, {
-    address: LAUNCH_PORTAL_ADDRESS,
+    address: portal,
     abi: VAULT_PORTAL_LAUNCH_ABI,
     functionName: "getVault",
     args: [token],
-    chainId: LAUNCH_CHAIN_ID,
+    chainId,
   });
   return {
     txHash: hash,
@@ -283,13 +295,24 @@ export async function launchCodegenTokenOnTestnet(
   };
 }
 
-export async function readVaultInfo(token: Address) {
+/** @deprecated Prefer launchCodegenToken(..., { chainId: 97 }). */
+export async function launchCodegenTokenOnTestnet(
+  input: LaunchTokenInput,
+  opts?: {
+    onProgress?: (message: string) => void;
+    salt?: Hex;
+  }
+): Promise<LaunchTokenResult> {
+  return launchCodegenToken(input, { ...opts, chainId: 97 });
+}
+
+export async function readVaultInfo(token: Address, chainId: FlapLaunchNetworkId = DEFAULT_LAUNCH_NETWORK.chainId) {
   return readContract(wagmiConfig, {
-    address: LAUNCH_PORTAL_ADDRESS,
+    address: launchPortalForChain(chainId),
     abi: VAULT_PORTAL_LAUNCH_ABI,
     functionName: "getVault",
     args: [token],
-    chainId: LAUNCH_CHAIN_ID,
+    chainId,
   });
 }
 

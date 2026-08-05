@@ -18,7 +18,7 @@ Flap Vault Gen is an AI-powered platform that lets anyone launch a custom vault 
 | **Fix loop** | Bounded AI retries; escalates to surgical fixes; abandons non-converging rule/test loops |
 | **Test** | Mainnet-fork Foundry integration test (Flap Rule 006) with journey preview in the UI |
 | **Audit** | Advisory Flap spec review + economic critic (stronger model when the vault owes pooled BNB) |
-| **Launch** | Deploy factory → register bytecode → launch token; user sets buy/sell tax % and optional metadata / dev buy |
+| **Launch** | Deploy factory → register bytecode → launch token on **testnet (default) or mainnet**; user sets buy/sell tax % and optional metadata / dev buy; mainnet requires an explicit confirmation gate |
 | **Persist** | Token record saved; appears on the public `/tokens` gallery and links to Flap at `/bnb-testnet/<address>` |
 
 ---
@@ -126,6 +126,7 @@ There is **no fixed menu of vault types**. The generator is archetype-free: any 
 | Chat refine | Follow-up messages re-run the pipeline on the same vault |
 | Wallet sign-in | MetaMask signature proves ownership — no transaction, no gas |
 | Configurable tax | Launch form: buy % and sell % (1%–10%, Flap limit: 100–1000 bps); default 5% / 5% |
+| Mainnet launch | Network toggle (testnet default); mainnet needs checklist + typed token symbol; real BNB warning |
 | Flap token URL | Testnet: `https://testnet.flap.sh/bnb-testnet/<address>` · Mainnet: `https://flap.sh/bnb/<address>` |
 | Prompt language | Plan / scope free-text matches EN or 中文 from the prompt (not the site toggle alone) |
 | i18n | Full English + Simplified Chinese UI |
@@ -159,11 +160,13 @@ There is **no fixed menu of vault types**. The generator is archetype-free: any 
 
 1. **Deploy factory** — deploys the user's `CodegenVaultFactory` on-chain  
 2. **Register vault** — writes creation bytecode so Flap shows the real description  
-3. **Launch token** — set name, symbol, **buy/sell tax %**, optional image/links/dev buy → Flap IPFS + `newTokenV6WithVault`
+3. **Launch token** — pick **Testnet** (default) or **Mainnet**, set name, symbol, **buy/sell tax %**, optional image/links/dev buy → Flap IPFS + `newTokenV6WithVault`
 
 Tax rates are chosen in the studio launch panel (percent inputs) and converted to basis points for the portal. They cannot be changed after launch.
 
-After launch, the token appears on `/tokens` and the Flap link uses `/bnb-testnet/<address>` (testnet) or `/bnb/<address>` (mainnet).
+Mainnet adds a blocking confirmation (real BNB warning, review checklist, type the token symbol). Testnet-first is recommended but not required.
+
+After launch, the token appears on `/tokens` and the Flap link uses `/bnb-testnet/<address>` (testnet) or `/bnb/<address>` (mainnet) from the saved `chainId`.
 
 ---
 

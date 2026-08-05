@@ -8,10 +8,23 @@
  *   broadcast/RegisterAndLaunch.s.sol/97/run-latest.json.
  */
 import { decodeErrorResult, type Address, type Hex } from "viem";
-import { FLAP_BSC_TESTNET, FLAP_LAUNCH_DEFAULTS } from "./flap-testnet";
+import { FLAP_LAUNCH_DEFAULTS } from "./flap-testnet";
+import {
+  DEFAULT_LAUNCH_NETWORK,
+  FLAP_BSC_MAINNET,
+  FLAP_BSC_TESTNET,
+  getFlapNetwork,
+  isFlapLaunchChainId,
+} from "./flap-networks";
 
+/** @deprecated Prefer getFlapNetwork(chainId).vaultPortal — defaults to testnet. */
 export const LAUNCH_PORTAL_ADDRESS = FLAP_BSC_TESTNET.vaultPortal;
-export const LAUNCH_CHAIN_ID = FLAP_BSC_TESTNET.chainId;
+/** @deprecated Prefer target network state — defaults to testnet (97). */
+export const LAUNCH_CHAIN_ID = DEFAULT_LAUNCH_NETWORK.chainId;
+
+export function launchPortalForChain(chainId: number): Address {
+  return getFlapNetwork(chainId).vaultPortal;
+}
 
 /** Matches broadcast RegisterAndLaunch.s.sol on BSC testnet chain 97. */
 export const LAUNCH_FUNCTION_SIGNATURE =
@@ -246,8 +259,11 @@ export function checkLaunchPayload(input: LaunchValidationInput): LaunchPayloadI
   if (!input.walletAddress || !/^0x[a-fA-F0-9]{40}$/.test(input.walletAddress)) {
     return { code: "wallet", message: "Connect MetaMask first." };
   }
-  if (input.chainId !== undefined && input.chainId !== null && input.chainId !== LAUNCH_CHAIN_ID) {
-    return { code: "chain", message: "Switch to BNB Smart Chain testnet (chain 97) before launching." };
+  if (input.chainId !== undefined && input.chainId !== null && !isFlapLaunchChainId(input.chainId)) {
+    return {
+      code: "chain",
+      message: "Switch to BNB Smart Chain testnet (97) or mainnet (56) before launching.",
+    };
   }
   if (!input.factoryAddress || !/^0x[a-fA-F0-9]{40}$/.test(input.factoryAddress)) {
     return { code: "factory", message: "Deploy the CodegenVaultFactory first (step 1)." };
@@ -407,10 +423,18 @@ export function decodeLaunchRevert(err: unknown, ctx?: LaunchCallContext): Decod
     return { reason: "Connect MetaMask first.", errorName: null, raw };
   }
   if (lower.includes("insufficient funds")) {
-    return { reason: "Not enough tBNB for gas — top up from the faucet and retry.", errorName: null, raw };
+    const gasHint =
+      ctx?.chainId === FLAP_BSC_MAINNET.chainId
+        ? "Not enough BNB for gas — add BNB and retry."
+        : "Not enough tBNB for gas — top up from the faucet and retry.";
+    return { reason: gasHint, errorName: null, raw };
   }
   if (lower.includes("chain mismatch") || lower.includes("does not match the target chain")) {
-    return { reason: "Wallet is on the wrong network — switch to BNB Smart Chain testnet (chain 97).", errorName: null, raw };
+    return {
+      reason: "Wallet is on the wrong network — switch to the selected BSC network (testnet 97 or mainnet 56).",
+      errorName: null,
+      raw,
+    };
   }
 
   // viem's unhelpful blank-signature message
@@ -469,11 +493,14 @@ export function buildLaunchCallContext(input: {
   registeredOnChain?: boolean;
   devBuyWei?: bigint;
   metaCid?: string | null;
+  /** Defaults to BSC testnet when omitted. */
+  chainId?: number;
 }): LaunchCallContext {
   const mode = input.vaultDataMode ?? "registered";
+  const chainId = input.chainId !== undefined && isFlapLaunchChainId(input.chainId) ? input.chainId : LAUNCH_CHAIN_ID;
   return {
-    chainId: LAUNCH_CHAIN_ID,
-    portalAddress: LAUNCH_PORTAL_ADDRESS,
+    chainId,
+    portalAddress: launchPortalForChain(chainId),
     wallet: input.wallet ?? null,
     tokenName: input.tokenName.trim(),
     tokenSymbol: input.tokenSymbol.trim().toUpperCase(),

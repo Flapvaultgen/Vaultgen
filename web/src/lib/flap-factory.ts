@@ -1,10 +1,10 @@
+import { isAddress, type Hex } from "viem";
 import {
-  createPublicClient,
-  http,
-  isAddress,
-  type Hex,
-} from "viem";
-import { bscTestnet } from "viem/chains";
+  DEFAULT_LAUNCH_NETWORK,
+  flapPublicClient,
+  getFlapNetwork,
+  type FlapLaunchNetworkId,
+} from "./flap-networks";
 
 /** Matches testnet.flap.sh `vaultDataSchema()` ABI (module 4054 / I2). */
 export const CODEGEN_FACTORY_ABI = [
@@ -50,10 +50,8 @@ export const CODEGEN_FACTORY_ABI = [
   },
 ] as const;
 
-export const flapTestnetPublicClient = createPublicClient({
-  chain: bscTestnet,
-  transport: http(),
-});
+/** @deprecated Prefer flapPublicClient(chainId). */
+export const flapTestnetPublicClient = flapPublicClient(DEFAULT_LAUNCH_NETWORK.chainId);
 
 export type FactoryProbeResult =
   | {
@@ -68,38 +66,41 @@ export type FactoryProbeResult =
       detail?: string;
     };
 
-/** Probe factory on BSC testnet public RPC (independent of wallet chain). */
-export async function probeCodegenFactoryOnTestnet(
-  factoryAddress: string
+/** Probe factory on the given BSC network's public RPC (independent of wallet chain). */
+export async function probeCodegenFactory(
+  factoryAddress: string,
+  chainId: FlapLaunchNetworkId = DEFAULT_LAUNCH_NETWORK.chainId
 ): Promise<FactoryProbeResult> {
   if (!isAddress(factoryAddress)) {
     return { ok: false, reason: "invalid_address" };
   }
 
   const address = factoryAddress as Hex;
+  const client = flapPublicClient(chainId);
+  const net = getFlapNetwork(chainId);
 
   try {
-    const bytecode = await flapTestnetPublicClient.getBytecode({ address });
+    const bytecode = await client.getBytecode({ address });
     if (!bytecode || bytecode === "0x") {
       return {
         ok: false,
         reason: "no_code",
-        detail: "No contract at this address on BSC testnet (chain 97).",
+        detail: `No contract at this address on ${net.label} (chain ${chainId}).`,
       };
     }
 
     const [schema, specVersion, bnbQuoteSupported] = await Promise.all([
-      flapTestnetPublicClient.readContract({
+      client.readContract({
         address,
         abi: CODEGEN_FACTORY_ABI,
         functionName: "vaultDataSchema",
       }),
-      flapTestnetPublicClient.readContract({
+      client.readContract({
         address,
         abi: CODEGEN_FACTORY_ABI,
         functionName: "factorySpecVersion",
       }),
-      flapTestnetPublicClient.readContract({
+      client.readContract({
         address,
         abi: CODEGEN_FACTORY_ABI,
         functionName: "isQuoteTokenSupported",
@@ -128,4 +129,9 @@ export async function probeCodegenFactoryOnTestnet(
       detail: err instanceof Error ? err.message.split("\n")[0] : "vaultDataSchema call failed",
     };
   }
+}
+
+/** @deprecated Prefer probeCodegenFactory(address, 97). */
+export async function probeCodegenFactoryOnTestnet(factoryAddress: string): Promise<FactoryProbeResult> {
+  return probeCodegenFactory(factoryAddress, 97);
 }
