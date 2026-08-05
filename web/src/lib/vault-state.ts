@@ -8,6 +8,9 @@
  * chat on any device/browser recovers the same factory address, registered
  * creation bytecode, register tx, and launched token by replaying every
  * launch_status event ever saved for it.
+ *
+ * Events are scoped by chainId (97 testnet / 56 mainnet). Legacy events
+ * without chainId are treated as BSC testnet (97).
  */
 
 /** Structural subset of GeneratedArtifact (avoids importing chat-api's browser-only module). */
@@ -17,6 +20,17 @@ export type VaultStateArtifact = {
   createdAt: string;
 };
 
+export type PersistedLaunchedToken = {
+  tokenAddress: string;
+  vaultAddress: string;
+  factoryAddress: string;
+  txHash: string;
+  name: string;
+  symbol: string;
+  launchedAt: string;
+  chainId: number;
+};
+
 export type PersistedVaultState = {
   factoryAddress: string | null;
   factoryArtifactFingerprint: string | null;
@@ -24,15 +38,9 @@ export type PersistedVaultState = {
   registeredWallet: string | null;
   registeredTxHash: string | null;
   registeredPayloadFingerprint: string | null;
-  launched: {
-    tokenAddress: string;
-    vaultAddress: string;
-    factoryAddress: string;
-    txHash: string;
-    name: string;
-    symbol: string;
-    launchedAt: string;
-  } | null;
+  /** Chain this snapshot was folded for (null when empty / no chain filter). */
+  chainId: number | null;
+  launched: PersistedLaunchedToken | null;
 };
 
 const EMPTY_VAULT_STATE: PersistedVaultState = {
@@ -42,19 +50,40 @@ const EMPTY_VAULT_STATE: PersistedVaultState = {
   registeredWallet: null,
   registeredTxHash: null,
   registeredPayloadFingerprint: null,
+  chainId: null,
   launched: null,
 };
 
-/** Folds every launch_status artifact (oldest → newest) into the current vault state. */
-export function mergeVaultState<T extends VaultStateArtifact>(artifacts: T[]): PersistedVaultState {
+/** Legacy launch_status rows omit chainId — those were always BSC testnet. */
+export function eventChainId(metadata: Record<string, unknown>): number {
+  const raw = metadata.chainId;
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw === "string" && /^\d+$/.test(raw)) return Number(raw);
+  return 97;
+}
+
+/**
+ * Folds every launch_status artifact (oldest → newest) into the current vault state.
+ * When `chainId` is set, only events for that chain are applied so a testnet
+ * launch never masquerades as a mainnet one (and vice versa).
+ */
+export function mergeVaultState<T extends VaultStateArtifact>(
+  artifacts: T[],
+  chainId?: number | null
+): PersistedVaultState {
   const events = artifacts
     .filter((a) => a.artifactType === "launch_status")
+    .filter((a) => (chainId === undefined || chainId === null ? true : eventChainId(a.metadata) === chainId))
     .slice()
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 
-  const acc: PersistedVaultState = { ...EMPTY_VAULT_STATE };
+  const acc: PersistedVaultState = {
+    ...EMPTY_VAULT_STATE,
+    chainId: chainId === undefined || chainId === null ? null : chainId,
+  };
   for (const a of events) {
     const m = a.metadata;
+    const eventChain = eventChainId(m);
     if (m.status === "factory_cleared") {
       // Explicit "forget this factory" event (the "Clear saved" button) — must
       // win over any earlier factory_deployed event, which is why this is
@@ -88,6 +117,7 @@ export function mergeVaultState<T extends VaultStateArtifact>(artifacts: T[]): P
         name: typeof m.name === "string" ? m.name : "",
         symbol: typeof m.symbol === "string" ? m.symbol : "",
         launchedAt: typeof m.launchedAt === "string" ? m.launchedAt : a.createdAt,
+        chainId: eventChain,
       };
     }
   }

@@ -92,6 +92,9 @@ type Props = {
    * this panel work the same on any device or browser.
    */
   persistedVaultState?: PersistedVaultState | null;
+  /** Controlled launch network (ChatPage checklist stays in sync with the toggle). */
+  targetChainId?: FlapLaunchNetworkId;
+  onTargetChainIdChange?: (chainId: FlapLaunchNetworkId) => void;
 };
 
 type LaunchPhase = "idle" | "factory" | "register" | "switching" | "launching";
@@ -122,6 +125,8 @@ export default function LaunchOnFlapPanel({
   chatId,
   runId,
   persistedVaultState,
+  targetChainId: controlledTargetChainId,
+  onTargetChainIdChange,
 }: Props) {
   const { dict } = useI18n();
   const { address, isConnected } = useAccount();
@@ -179,7 +184,17 @@ export default function LaunchOnFlapPanel({
   const [metaCid, setMetaCid] = useState<string | null>(null);
 
   /** Launch target — defaults to BSC testnet; mainnet requires an explicit confirm gate. */
-  const [targetChainId, setTargetChainId] = useState<FlapLaunchNetworkId>(DEFAULT_LAUNCH_NETWORK.chainId);
+  const [internalTargetChainId, setInternalTargetChainId] = useState<FlapLaunchNetworkId>(
+    DEFAULT_LAUNCH_NETWORK.chainId
+  );
+  const targetChainId = controlledTargetChainId ?? internalTargetChainId;
+  const setTargetChainId = useCallback(
+    (next: FlapLaunchNetworkId) => {
+      if (onTargetChainIdChange) onTargetChainIdChange(next);
+      else setInternalTargetChainId(next);
+    },
+    [onTargetChainIdChange]
+  );
   const [mainnetAckRealFunds, setMainnetAckRealFunds] = useState(false);
   const [mainnetAckReviewed, setMainnetAckReviewed] = useState(false);
   const [mainnetAckNotAudit, setMainnetAckNotAudit] = useState(false);
@@ -205,8 +220,8 @@ export default function LaunchOnFlapPanel({
   const dbFactoryValid = dbFactory && /^0x[a-fA-F0-9]{40}$/.test(dbFactory);
   const targetNet = getFlapNetwork(targetChainId);
   const isMainnetTarget = targetChainId === FLAP_BSC_MAINNET.chainId;
-  // DB factory is only trusted on testnet (legacy chats have no factory chainId).
-  const useDbFactory = targetChainId === FLAP_BSC_TESTNET.chainId && dbFactoryValid;
+  // persistedVaultState is already filtered to targetChainId by ChatPage.
+  const useDbFactory = dbFactoryValid;
   const factoryFingerprint = configuredFactory
     ? CURRENT_FACTORY_FP // an explicit override is always treated as current
     : useDbFactory
@@ -259,13 +274,10 @@ export default function LaunchOnFlapPanel({
       setConfig(c);
       const configured = getConfiguredFactoryAddress(c);
       const dbFactory = persistedVaultState?.factoryAddress;
-      const dbIsAddress =
-        targetChainId === FLAP_BSC_TESTNET.chainId &&
-        dbFactory &&
-        /^0x[a-fA-F0-9]{40}$/.test(dbFactory);
+      const dbIsAddress = dbFactory && /^0x[a-fA-F0-9]{40}$/.test(dbFactory);
       // Config (explicit deploy-time override) wins; otherwise the database
-      // record for this chat outranks this browser's local cache on testnet.
-      // Mainnet uses a separate per-chain factory cache (factories are not portable).
+      // record for this chat+chain outranks this browser's local cache.
+      // Factories are not portable across chains.
       setFactoryAddress(
         configured ?? (dbIsAddress ? (dbFactory as `0x${string}`) : getCachedFactoryAddress(targetChainId))
       );
@@ -339,16 +351,25 @@ export default function LaunchOnFlapPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [factoryAddress, address, factoryOutdated, registerTx, contractName, vaultDescription, targetChainId]);
 
-  // Restore a previously launched token: this wallet's local record first,
-  // then the database record for this chat (works across devices / wallets).
+  // Restore a previously launched token for *this* chain only — a testnet
+  // launch must never show as "Launched" when Mainnet is selected.
   useEffect(() => {
-    const dbLaunched = persistedVaultState?.launched ?? null;
+    const dbLaunched =
+      persistedVaultState?.launched &&
+      (persistedVaultState.launched.chainId === targetChainId ||
+        // Defensive: mergeVaultState already filters, but older callers may omit chainId.
+        persistedVaultState.chainId === targetChainId)
+        ? {
+            ...persistedVaultState.launched,
+            chainId: targetChainId,
+          }
+        : null;
     if (address && contractName) {
-      setLaunched(loadLaunchedToken(contractName, address) ?? dbLaunched);
+      setLaunched(loadLaunchedToken(contractName, address, targetChainId) ?? dbLaunched);
       return;
     }
     setLaunched(dbLaunched);
-  }, [address, contractName, persistedVaultState?.launched]);
+  }, [address, contractName, persistedVaultState?.launched, persistedVaultState?.chainId, targetChainId]);
 
   // Provisionally trust the database's "registered" record for this exact
   // payload immediately on load — the on-chain read effect above still runs
@@ -661,6 +682,7 @@ export default function LaunchOnFlapPanel({
         name,
         symbol,
         launchedAt: new Date().toISOString(),
+        chainId: targetChainId,
       };
       saveLaunchedToken(contractName, address, record);
       setLaunched(record);
@@ -670,12 +692,11 @@ export default function LaunchOnFlapPanel({
         status: "launched",
         contractName,
         wallet: address,
-        chainId: targetChainId,
         launchUrl,
         buyTaxBps: buyTaxRateBps,
         sellTaxBps: sellTaxRateBps,
         registerTxHash: registerTx,
-        ...record,
+        ...record, // includes chainId for the selected network
       });
       void createLaunchedTokenRecord({
         chatId: chatId ?? null,
@@ -1133,7 +1154,7 @@ export default function LaunchOnFlapPanel({
         <div className="mt-3 space-y-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 p-2.5">
           <p className="inline-flex items-center gap-1.5 font-medium text-emerald-300">
             <Check className="size-3.5" />
-            Launched — {launched.name} ({launched.symbol})
+            Launched on {targetNet.label} — {launched.name} ({launched.symbol})
           </p>
           <div className="grid gap-1 text-[0.65rem] text-muted-foreground">
             <p>

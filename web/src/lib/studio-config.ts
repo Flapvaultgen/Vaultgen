@@ -107,23 +107,45 @@ export type LaunchedTokenRecord = {
   name: string;
   symbol: string;
   launchedAt: string;
+  /** Network the token was launched on — required so testnet launches don't show on mainnet. */
+  chainId: FlapLaunchNetworkId;
 };
 
-/** Keyed by contract name + launcher wallet: this browser may test several vaults/wallets. */
-function launchedTokenKey(contractName: string, launcherAddress: string): string {
-  return `flapVaultGen.launchedToken.${contractName}.${launcherAddress.toLowerCase()}`;
+/** Keyed by contract + wallet + chain: testnet and mainnet launches must not collide. */
+function launchedTokenKey(
+  contractName: string,
+  launcherAddress: string,
+  chainId: FlapLaunchNetworkId
+): string {
+  return `flapVaultGen.launchedToken.${contractName}.${launcherAddress.toLowerCase()}.${chainId}`;
 }
 
 export function saveLaunchedToken(contractName: string, launcherAddress: string, record: LaunchedTokenRecord): void {
   if (typeof localStorage === "undefined") return;
-  localStorage.setItem(launchedTokenKey(contractName, launcherAddress), JSON.stringify(record));
+  localStorage.setItem(launchedTokenKey(contractName, launcherAddress, record.chainId), JSON.stringify(record));
 }
 
-export function loadLaunchedToken(contractName: string, launcherAddress: string): LaunchedTokenRecord | null {
+export function loadLaunchedToken(
+  contractName: string,
+  launcherAddress: string,
+  chainId: FlapLaunchNetworkId
+): LaunchedTokenRecord | null {
   if (typeof localStorage === "undefined") return null;
   try {
-    const raw = localStorage.getItem(launchedTokenKey(contractName, launcherAddress));
-    return raw ? (JSON.parse(raw) as LaunchedTokenRecord) : null;
+    const raw = localStorage.getItem(launchedTokenKey(contractName, launcherAddress, chainId));
+    if (!raw) {
+      // Legacy key (pre-mainnet) — only surface on testnet.
+      if (chainId !== 97) return null;
+      const legacy = localStorage.getItem(
+        `flapVaultGen.launchedToken.${contractName}.${launcherAddress.toLowerCase()}`
+      );
+      if (!legacy) return null;
+      const parsed = JSON.parse(legacy) as LaunchedTokenRecord;
+      return { ...parsed, chainId: 97 };
+    }
+    const parsed = JSON.parse(raw) as LaunchedTokenRecord;
+    if (parsed.chainId !== undefined && parsed.chainId !== chainId) return null;
+    return { ...parsed, chainId };
   } catch {
     return null;
   }

@@ -132,6 +132,41 @@ check(
   afterClearThenRedeploy.factoryAddress === "0xNEW00000000000000000000000000000000000B"
 );
 
+// Chain scoping: legacy events (no chainId) are testnet (97); mainnet filter
+// must not surface a testnet launch as "Launched".
+const crossChain = [
+  artifact("2026-01-01T00:00:00Z", {
+    status: "factory_deployed",
+    factoryAddress: "0xTESTFACTORY0000000000000000000000000001",
+    factoryArtifactFingerprint: "fp-test",
+    // no chainId → legacy testnet
+  }),
+  artifact("2026-01-02T00:00:00Z", {
+    status: "launched",
+    tokenAddress: "0xTESTTOKEN000000000000000000000000000001",
+    vaultAddress: "0xTESTVAULT00000000000000000000000000001",
+    factoryAddress: "0xTESTFACTORY0000000000000000000000000001",
+    txHash: "0xTXTEST",
+    name: "TestnetToken",
+    symbol: "TT",
+    launchedAt: "2026-01-02T00:00:00Z",
+  }),
+  artifact("2026-01-03T00:00:00Z", {
+    status: "factory_deployed",
+    factoryAddress: "0xMAINFACTORY0000000000000000000000000002",
+    factoryArtifactFingerprint: "fp-main",
+    chainId: 56,
+  }),
+];
+const testnetView = mergeVaultState(crossChain, 97);
+check("testnet filter sees legacy launch", testnetView.launched?.tokenAddress === "0xTESTTOKEN000000000000000000000000000001");
+check("testnet filter sees legacy factory", testnetView.factoryAddress === "0xTESTFACTORY0000000000000000000000000001");
+check("testnet launched.chainId is 97", testnetView.launched?.chainId === 97);
+
+const mainnetView = mergeVaultState(crossChain, 56);
+check("mainnet filter hides testnet launch", mainnetView.launched === null);
+check("mainnet filter sees mainnet factory only", mainnetView.factoryAddress === "0xMAINFACTORY0000000000000000000000000002");
+
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed`);
   process.exit(1);

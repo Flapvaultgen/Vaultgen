@@ -13,7 +13,6 @@ import {
   Wallet,
 } from "lucide-react";
 import { useAccount, useChainId } from "wagmi";
-import { bscTestnet } from "viem/chains";
 import {
   getChat,
   getChatArtifacts,
@@ -33,6 +32,7 @@ import {
 } from "./lib/chat-api";
 import type { ApproximationConsent, CodegenResult, MechanicSpec, RepairAttempt, VaultScope } from "./lib/codegen";
 import { getDeployBlockReason, isDeployReady, isLaunchReady, scopeAllowsLaunch } from "./lib/deploy-gate";
+import { DEFAULT_LAUNCH_NETWORK, getFlapNetwork, type FlapLaunchNetworkId } from "./lib/flap-networks";
 import { isUsableCreationBytecode } from "./lib/flap-register";
 import { loadVaultBytecode, saveVaultBytecode } from "./lib/studio-config";
 import { getCurrentUserId, subscribeCurrentUser } from "./lib/current-user";
@@ -175,7 +175,10 @@ export default function ChatPage({ chatId }: Props) {
 
   const { isConnected: walletConnected, address: walletAddress } = useAccount();
   const walletChainId = useChainId();
-  const onTestnet = walletChainId === bscTestnet.id;
+  /** Launch target — shared with LaunchOnFlapPanel so the checklist matches the toggle. */
+  const [launchChainId, setLaunchChainId] = useState<FlapLaunchNetworkId>(DEFAULT_LAUNCH_NETWORK.chainId);
+  const launchNet = getFlapNetwork(launchChainId);
+  const onLaunchNetwork = walletChainId === launchChainId;
 
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -478,7 +481,10 @@ export default function ChatPage({ chatId }: Props) {
   // makes the launch panel work the same on any device or browser for this
   // chat. localStorage is kept only as a same-browser cache for instant
   // paint before this loads.
-  const persistedVault = useMemo(() => mergeVaultState(artifacts), [artifacts]);
+  const persistedVault = useMemo(
+    () => mergeVaultState(artifacts, launchChainId),
+    [artifacts, launchChainId]
+  );
 
   const deployable = !!result && isDeployReady(result);
   const launchReady =
@@ -855,9 +861,9 @@ export default function ChatPage({ chatId }: Props) {
                         )}
                         {!deployable
                           ? "Launch blocked"
-                          : walletConnected && onTestnet
+                          : walletConnected && onLaunchNetwork
                             ? "All launch gates pass"
-                            : "Contract ready — connect your wallet on BNB testnet to continue"}
+                            : `Contract ready — connect your wallet on ${launchNet.label} to continue`}
                       </div>
                       <div className="grid gap-1.5 sm:grid-cols-2">
                         <GateRow ok={result.compiled} label="Compiled" />
@@ -887,10 +893,14 @@ export default function ChatPage({ chatId }: Props) {
                           }
                         />
                         <GateRow
-                          ok={walletConnected && onTestnet}
+                          ok={walletConnected && onLaunchNetwork}
                           label="Network"
                           detail={
-                            !walletConnected ? "—" : onTestnet ? "BNB testnet (97)" : `wrong chain (${walletChainId})`
+                            !walletConnected
+                              ? "—"
+                              : onLaunchNetwork
+                                ? `${launchNet.label} (${launchChainId})`
+                                : `wrong chain (${walletChainId}) — need ${launchChainId}`
                           }
                         />
                       </div>
@@ -913,6 +923,8 @@ export default function ChatPage({ chatId }: Props) {
                       chatId={chatId}
                       runId={activeRunId}
                       persistedVaultState={persistedVault}
+                      targetChainId={launchChainId}
+                      onTargetChainIdChange={setLaunchChainId}
                     />
                     {!deployable && !persistedVault.launched && (
                       <p className="text-xs text-muted-foreground">
