@@ -2,9 +2,11 @@
 
 Launching a custom vault on Flap normally requires coding skills, knowledge of the 9 spec rules, and avoiding common EVM pitfalls. Flap Vault Gen removes that barrier.
 
-Describe the mechanic in plain English. The platform generates Solidity using Flap's base contracts, compiles it with Foundry, runs static and behavioral checks, provides an advisory 9-rule Flap pre-audit — then lets you launch directly to Flap from the web UI.
+Describe the mechanic in plain English or 中文. The platform plans the vault, pauses for your approval, generates Solidity using Flap's base contracts, compiles it with Foundry, runs static and behavioral checks, provides an advisory 9-rule Flap pre-audit — then lets you set buy/sell tax and launch directly to Flap from the web UI.
 
 **More creative vaults on Flap. Less broken code making it to review.**
+
+For a fuller product walkthrough, see [`docs/PROJECT_OVERVIEW.md`](docs/PROJECT_OVERVIEW.md) and the in-app Docs page.
 
 ---
 
@@ -14,19 +16,20 @@ Each generation runs a closed loop until it passes or exhausts its retry budget:
 
 | Step | What runs | Purpose |
 |------|-----------|---------|
-| **0. Scope check** | `classifyVaultScope()` | Verdict (launch-ready / draft-only / refused) before any code is written |
-| **0b. Mechanic spec** | `planMechanicSpec()` | Authoritative plan: actors, buckets, actions, payout rules, lifecycle |
+| **0. Mechanic spec** | `planMechanicSpec()` | Authoritative plan: actors, buckets, actions, payout rules (same language as the prompt) |
+| **0b. You approve** | Studio plan card | Generation pauses so you can review the plan before any Solidity |
+| **0c. Scope check** | `classifyVaultScope()` | Verdict (launch-ready / draft-only / refused) before code is written |
 | **1. Draft** | Anthropic Claude | Writes a complete vault inheriting `CodegenVaultBase` / Flap V2 |
 | **2. Compile** | Foundry (`forge build`, solc 0.8.26) | Real compile against Flap interfaces; compile errors feed back to AI |
-| **3. Dual safety scan** | `scanSafetyCombined()` | Logic + mechanic completeness scanners |
-| **4. Fix loop** | AI + structured failure memory | Retries compile / safety / fork test failures (up to 12 passes) |
-| **5. Integration test** | Foundry + AI | Mainnet-fork test (Rule **006**); runs `forge test --fork-url` |
+| **3. Dual safety scan** | `scanSafetyCombined()` | Logic + mechanic completeness + ledger solvency scanners |
+| **4. Fix loop** | AI + structured failure memory | Retries compile / safety / fork test failures (bounded passes) |
+| **5. Integration test** | Foundry + AI | Mainnet-fork test (Rule **006**); journeys shown in the Review tab |
 | **6. Advisory audit** | 9-rule spec corpus + economic critic | Flap spec review + payout fairness; never blocks deploy |
 | **7. Refine in chat** | Same pipeline | Incremental edits re-run the full loop |
 
 **Deploy-ready gate:** compile OK + safety scanners pass + integration tests pass. Pre-audit is advisory for human review.
 
-**Deploy path:** compiled creation bytecode → `CodegenVaultFactory` (CREATE2) → Flap token launch on BSC testnet or mainnet.
+**Deploy path:** compiled creation bytecode → `CodegenVaultFactory` (CREATE2) → set buy/sell tax (1%–10%, Flap's 100–1000 bps limit) → Flap token launch on BSC testnet or mainnet.
 
 **Stack:** React studio · Node API · Foundry · Anthropic Claude · bundled `flap-spec-checker` rules · Flap V2 base contracts in `src/flap/`.
 
@@ -50,14 +53,17 @@ Each generation runs a closed loop until it passes or exhausts its retry budget:
 
 | Feature | Notes |
 |---------|-------|
-| Prompt → stream Solidity | Any mechanic that fits Flap Rules 001–009 |
+| Prompt → stream Solidity | Any mechanic that fits Flap Rules 001–009 — no fixed vault-type menu |
+| Plan approval | Review MechanicSpec before Solidity is written |
 | Chat refine | Follow-up messages update the same vault |
 | Wallet sign-in | MetaMask signature proves wallet ownership; session token on all API calls |
 | Chat history | Persisted per wallet in Supabase (in-memory fallback for local dev) |
-| Launch on Flap | Deploy factory → register bytecode → launch token with metadata, image, dev buy |
+| Configurable tax | Launch panel: buy % and sell % (1%–10%); default 5% / 5%; locked after launch |
+| Launch on Flap | Deploy factory → register bytecode → launch with tax, metadata, image, optional dev buy |
 | Tokens gallery | `/tokens` — public list of launched tokens with vault stats |
+| Flap token URL | Testnet: `testnet.flap.sh/bnb-testnet/<address>` · Mainnet: `flap.sh/bnb/<address>` |
 | Custom vault UI | AI generates a React component package; rendered in a sandboxed iframe |
-| English + 中文 | Full i18n; AI-generated vault code mirrors the user's language |
+| English + 中文 | Full UI i18n; plan/summary language follows the prompt (auto-detected) |
 | Advisory pre-audit | 9-rule Flap spec review + economic critic (advisory — never blocks deploy) |
 
 ---
