@@ -590,7 +590,7 @@ function fakeResult(overrides: Partial<CodegenResult> = {}): CodegenResult {
       tokenName: "Selfcheck Token",
       tokenSymbol: "SELF",
       status: "launched",
-      launchUrl: "https://testnet.flap.sh/tax/0x7777000000000000000000000000000000000001",
+      launchUrl: "https://testnet.flap.sh/bnb-testnet/0x7777000000000000000000000000000000000001",
     }),
   });
   const launchedBody = (await launchedRes.json()) as { walletAddress: string };

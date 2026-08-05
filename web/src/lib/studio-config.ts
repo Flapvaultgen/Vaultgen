@@ -134,9 +134,14 @@ export function flapLaunchUrl(base: string | undefined, factoryAddress: string):
   return `${launch}${sep}vaultfactory=${factoryAddress}`;
 }
 
+/**
+ * Direct token page on Flap. Testnet uses /bnb-testnet/<address>; mainnet
+ * uses /bnb/<address>. The old /tax/<address> path 404s.
+ */
 export function flapTaxTokenUrl(base: string | undefined, token: string): string {
   const root = (base ?? "https://testnet.flap.sh").replace(/\/$/, "");
-  return `${root}/tax/${token}`;
+  const path = /testnet/i.test(root) ? "bnb-testnet" : "bnb";
+  return `${root}/${path}/${token}`;
 }
 
 export function explorerTxUrl(explorerBase: string | undefined, hash: string): string {
