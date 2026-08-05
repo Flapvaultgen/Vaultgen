@@ -7,6 +7,8 @@ export interface Dictionary {
       tokens: string;
       chats: string;
       docs: string;
+      x: string;
+      xAria: string;
       menuAria: string;
     };
     langToggleAria: string;

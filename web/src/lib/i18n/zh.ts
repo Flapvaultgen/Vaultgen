@@ -9,6 +9,8 @@ export const zh: Dictionary = {
       tokens: "代币",
       chats: "对话记录",
       docs: "文档",
+      x: "X",
+      xAria: "Flap Vault Gen 的 X 账号",
       menuAria: "打开导航菜单",
     },
     langToggleAria: "切换语言",

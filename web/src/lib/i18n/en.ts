@@ -12,6 +12,8 @@ export const en: Dictionary = {
       tokens: "Tokens",
       chats: "Chats",
       docs: "Docs",
+      x: "X",
+      xAria: "Flap Vault Gen on X",
       menuAria: "Open navigation menu",
     },
     langToggleAria: "Switch language",

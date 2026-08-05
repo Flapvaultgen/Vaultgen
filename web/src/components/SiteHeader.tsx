@@ -4,6 +4,7 @@ import MetaMaskConnect from "./MetaMaskConnect";
 import { navigate } from "../lib/router";
 import { useI18n } from "../lib/i18n/context";
 
+const X_PROFILE_URL = "https://x.com/flapvaultgen";
 
 /** Small EN / 中文 pill toggle — persists to localStorage via I18nProvider. */
 function LanguageToggle() {
@@ -46,6 +47,22 @@ function NavLink({ label, to, onDone }: { label: string; to: string; onDone?: ()
     >
       {label}
     </button>
+  );
+}
+
+/** External plain-text nav link (opens in a new tab). */
+function ExtNavLink({ label, href, ariaLabel, onDone }: { label: string; href: string; ariaLabel: string; onDone?: () => void }) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      aria-label={ariaLabel}
+      onClick={() => onDone?.()}
+      className="text-[0.8rem] text-muted-foreground transition-colors hover:text-foreground"
+    >
+      {label}
+    </a>
   );
 }
 
@@ -92,6 +109,7 @@ export default function SiteHeader() {
           {links.map((l) => (
             <NavLink key={l.to} label={l.label} to={l.to} />
           ))}
+          <ExtNavLink label={t("common.nav.x")} href={X_PROFILE_URL} ariaLabel={t("common.nav.xAria")} />
         </nav>
 
         <div className="ml-auto flex items-center gap-2 md:ml-0">
@@ -118,6 +136,14 @@ export default function SiteHeader() {
               <NavLink label={l.label} to={l.to} onDone={() => setMobileOpen(false)} />
             </div>
           ))}
+          <div className="py-1.5 text-left">
+            <ExtNavLink
+              label={t("common.nav.x")}
+              href={X_PROFILE_URL}
+              ariaLabel={t("common.nav.xAria")}
+              onDone={() => setMobileOpen(false)}
+            />
+          </div>
         </nav>
       )}
     </header>
