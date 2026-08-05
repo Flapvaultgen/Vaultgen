@@ -219,7 +219,8 @@ export const en: Dictionary = {
       "Describe how you want your token's trading fees to be collected and paid out — in plain English or 中文, like you're explaining it to a friend. The studio turns that into a real smart contract, checks it for safety issues, tests it, and lets you launch it on Flap. No coding knowledge needed.",
     walletNote:
       "You can read this page and browse launched tokens without connecting anything. To describe an idea, chat, or launch a token, connect a wallet (MetaMask) first using the button in the top right — that wallet is how the studio knows which chats and tokens are yours.",
-    languageNote: "Switch the whole site between English and 中文 anytime with the EN / 中文 buttons in the top right — including the AI itself, which understands and replies in either language.",
+    languageNote:
+      "Switch the site chrome between English and 中文 with the EN / 中文 buttons in the top right. The AI plan and summaries follow the language of your prompt itself (English idea → English plan; Chinese idea → Chinese plan) — that is detected automatically, not guessed from the site toggle alone.",
 
     diagram: {
       architectureCaption: "From a plain-language idea to a live token on-chain",
@@ -245,11 +246,11 @@ export const en: Dictionary = {
       pipelineCaption: "Every generation goes through the same steps, automatically",
       pipelineSteps: [
         { title: "Plan it", note: "Who's involved, where money goes" },
-        { title: "Check feasibility", note: "Can this be built as asked?" },
+        { title: "You approve", note: "Review the plan before any code" },
         { title: "Write the code", note: "Turns the plan into a contract" },
         { title: "Safety checks", note: "Scans for common mistakes" },
         { title: "Test it", note: "Tried on a copy of the real chain" },
-        { title: "Ready to launch", note: "Goes live on Flap" },
+        { title: "Ready to launch", note: "Set tax, then go live on Flap" },
       ],
     },
 
@@ -268,13 +269,14 @@ export const en: Dictionary = {
       title: "What happens after you hit Generate",
       intro: "This isn't a single AI reply pretending to be a smart contract. Every request goes through the same careful, multi-step process:",
       steps: [
-        { title: "Plan it", body: "the AI first writes a short internal plan: who's involved, where the fee money goes, what people can click, and how payouts work." },
-        { title: "Check feasibility", body: "before writing any code, it decides: can this be built exactly as described? If not, it explains why and offers alternatives instead of quietly building something different than what you asked for." },
+        { title: "Plan it", body: "the AI first writes a short plan in the same language as your prompt: who's involved, where the fee money goes, what people can click, and how payouts work." },
+        { title: "You approve the plan", body: "generation pauses so you can read that plan before any Solidity is written. Approve to continue, or describe a change and it replans first." },
+        { title: "Check feasibility", body: "it also decides: can this be built exactly as described? If not, it explains why and offers alternatives instead of quietly building something different than what you asked for." },
         { title: "Write the code", body: "it turns the plan into an actual smart contract, using Flap's official building blocks." },
         { title: "Compile it", body: "the code is built with the same professional tools real blockchain developers use, catching mistakes immediately." },
-        { title: "Safety checks", body: "automated scans look for the kind of mistakes that have caused real projects to lose money — like doing risky work in the function that receives trading fees, or letting one person unfairly drain a reward pool meant to be shared." },
+        { title: "Safety checks", body: "automated scans look for the kind of mistakes that have caused real projects to lose money — like doing risky work in the function that receives trading fees, or promising the same BNB to two people." },
         { title: "Fix it automatically", body: "if a check fails, the AI reads exactly what went wrong and tries again — up to several attempts — without you needing to do anything." },
-        { title: "Test it for real", body: "a test is written and run against a live copy of the actual blockchain, so the contract is checked under realistic conditions before you ever risk real money." },
+        { title: "Test it for real", body: "a test is written and run against a live copy of the actual blockchain; you can see those user journeys in the Review tab." },
         { title: "A second opinion (informational)", body: "two more automated reviews check the contract against Flap's official rules and against fairness/economics. These are shown to you as guidance — they inform you, they don't block you." },
         { title: "Keep refining", body: "once you have a result, just keep describing changes in the chat — in English or 中文. The same process runs again on your existing vault." },
       ],
@@ -414,13 +416,13 @@ export const en: Dictionary = {
         "Go through the advisory review yourself, item by item",
         "If you expect real trading volume, get an independent security review before going live",
       ],
-      metadataTitle: "Adding a picture, description, and links",
+      metadataTitle: "Tax, picture, description, and links",
       metadataBody:
-        "Before you launch, the launch screen lets you add a token image, a short description, and links to your website, X/Twitter, and Telegram — these are stored through Flap's own official metadata service and shown on flap.sh. You can also choose how much BNB you personally buy at launch (optional). None of this can be changed after the token launches, so it's worth double-checking before you confirm.",
+        "Before you launch, the launch screen lets you set the buy tax and sell tax yourself (each from 1% to 10% — Flap's limit; default is 5% / 5%). You can also add a token image, a short description, and links to your website, X/Twitter, and Telegram — stored through Flap's official metadata service and shown on flap.sh — plus an optional amount of BNB you buy at launch. Tax rates and metadata cannot be changed after the token launches.",
       galleryTitle: "Your token's public page",
       galleryBody:
-        "Every token launched here also gets its own public page, listed under \"Tokens\" in the top menu — anyone can browse it, see its image, tax rate, and vault screen, with no login or coding knowledge needed. This is separate from your private chat history, which only your connected wallet can see.",
-      outro: "When you're ready, launching happens through the same official system Flap uses for every token — right from this site, connected to your own wallet. If you want a more upgradeable setup for a serious, longer-lived project, just mention that when describing your idea.",
+        "Every token launched here also gets its own public page under \"Tokens\" in the top menu — anyone can browse it, see its image, tax rate, and vault screen, with no login needed. The link to Flap itself uses the direct token page (testnet: testnet.flap.sh/bnb-testnet/<address>). Your private chat history stays visible only to your connected wallet.",
+      outro: "When you're ready, launching happens through the same official system Flap uses for every token — right from this site, connected to your own wallet.",
     },
   },
 };

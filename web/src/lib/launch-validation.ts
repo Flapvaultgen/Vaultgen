@@ -17,9 +17,33 @@ export const LAUNCH_CHAIN_ID = FLAP_BSC_TESTNET.chainId;
 export const LAUNCH_FUNCTION_SIGNATURE =
   "newTokenV6WithVault((string,string,string,uint8,bytes32,uint8,address,uint256,bytes,bytes32,bytes,uint8,uint8,uint16,uint16,uint64,uint64,uint16,uint16,uint16,uint16,uint256,address,address,uint8,address,bytes))";
 
-/** Portal InvalidTaxRate: tax must be > 0 and <= 1000 bps (10%). */
+/**
+ * Flap VaultPortal InvalidTaxRate: tax must be > 0 and <= 1000 bps.
+ * Product / docs frame the usable range as 1%–10% (100–1000 bps):
+ *   IVaultPortal: "tax rate in basis points (e.g., 100 = 1%, max 1000 = 10%)"
+ */
+export const MIN_PORTAL_TAX_BPS = 100;
 export const MAX_PORTAL_TAX_BPS = 1_000;
+export const MIN_LAUNCH_TAX_PERCENT = 1;
+export const MAX_LAUNCH_TAX_PERCENT = 10;
 export const DEFAULT_LAUNCH_TAX_BPS = 500;
+/** Default shown in the launch form as a percent (5 → 500 bps). */
+export const DEFAULT_LAUNCH_TAX_PERCENT = "5";
+
+/**
+ * Parse a user-facing percent string (e.g. "5" or "2.5") into Flap portal bps.
+ * Returns null when empty/invalid or outside 1%–10% (100–1000 bps).
+ */
+export function parseTaxPercentToBps(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const percent = Number(trimmed);
+  if (!Number.isFinite(percent)) return null;
+  if (percent < MIN_LAUNCH_TAX_PERCENT || percent > MAX_LAUNCH_TAX_PERCENT) return null;
+  const bps = Math.round(percent * 100);
+  if (bps < MIN_PORTAL_TAX_BPS || bps > MAX_PORTAL_TAX_BPS) return null;
+  return bps;
+}
 
 /** Custom errors from IVaultPortal + common factory errors surfaced during launch. */
 export const VAULT_PORTAL_LAUNCH_ABI = [
@@ -173,7 +197,7 @@ function friendlyLaunchError(errorName: string, args: readonly unknown[] | undef
   switch (errorName) {
     case "InvalidTaxRate": {
       const rate = typeof args?.[0] === "bigint" ? args[0].toString() : String(args?.[0] ?? "?");
-      return `Portal rejected tax rate ${rate} bps — buy/sell tax must be between 1 and ${MAX_PORTAL_TAX_BPS} (10%).`;
+      return `Portal rejected tax rate ${rate} bps — buy/sell tax must be between ${MIN_PORTAL_TAX_BPS} and ${MAX_PORTAL_TAX_BPS} bps (1%–10%).`;
     }
     case "InvalidMktBps":
       return "Portal rejected mktBps — market allocation must be > 0 (the app defaults to 100%).";
@@ -237,11 +261,17 @@ export function checkLaunchPayload(input: LaunchValidationInput): LaunchPayloadI
 
   const buy = input.buyTaxRateBps ?? DEFAULT_LAUNCH_TAX_BPS;
   const sell = input.sellTaxRateBps ?? DEFAULT_LAUNCH_TAX_BPS;
-  if (buy <= 0 || buy > MAX_PORTAL_TAX_BPS) {
-    return { code: "buy_tax", message: `Buy tax must be between 1 and ${MAX_PORTAL_TAX_BPS} bps (0.01%–10%).` };
+  if (buy < MIN_PORTAL_TAX_BPS || buy > MAX_PORTAL_TAX_BPS) {
+    return {
+      code: "buy_tax",
+      message: `Buy tax must be between ${MIN_PORTAL_TAX_BPS} and ${MAX_PORTAL_TAX_BPS} bps (1%–10%).`,
+    };
   }
-  if (sell <= 0 || sell > MAX_PORTAL_TAX_BPS) {
-    return { code: "sell_tax", message: `Sell tax must be between 1 and ${MAX_PORTAL_TAX_BPS} bps (0.01%–10%).` };
+  if (sell < MIN_PORTAL_TAX_BPS || sell > MAX_PORTAL_TAX_BPS) {
+    return {
+      code: "sell_tax",
+      message: `Sell tax must be between ${MIN_PORTAL_TAX_BPS} and ${MAX_PORTAL_TAX_BPS} bps (1%–10%).`,
+    };
   }
 
   const mode = input.vaultDataMode ?? "registered";
