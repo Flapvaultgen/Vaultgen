@@ -20,6 +20,11 @@
 
 import { getAllFlapRules, getFlapRule, FLAP_RULE_IDS, type FlapRuleId } from "./constitution.js";
 import type { MechanicDesign } from "./vault-plan.js";
+import {
+  detectPromptLanguage,
+  outputLanguageDirective,
+  type PromptLanguage,
+} from "./prompt-language.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -969,7 +974,7 @@ export function normalizeMechanicSpec(raw: unknown, fallback: MechanicSpec): Mec
 
 // ── The planner: every prompt produces a MechanicSpec ────────────────────────
 
-function plannerSystemPrompt(): string {
+function plannerSystemPrompt(outputLang: PromptLanguage): string {
   const ruleList = getAllFlapRules()
     .map((r) => `Rule ${r.id} — ${r.title}: ${r.summary}`)
     .join("\n");
@@ -978,11 +983,11 @@ The user describes ANY vault mechanic in plain English or Simplified Chinese. BE
 written, you produce a complete MechanicSpec — a free-form product/mechanic plan. This is NOT a template
 and there is NO fixed menu of vault types. Design exactly the mechanic the user described.
 
-LANGUAGE: understand the user's request fluently whether it is written in English, Simplified Chinese, or a
-mix. Keys, "role"/"mode"/enum-style values, and "contractName" must stay in English (fixed schema / valid
+${outputLanguageDirective(outputLang)}
+Keys, "role"/"mode"/enum-style values, and "contractName" must stay in English (fixed schema / valid
 Solidity identifier). Free-text fields meant for a human to read — "productSummary", "description", notes,
-"strategy", risk notes — should mirror the user's language: write them in Simplified Chinese when the
-user's prompt is primarily Chinese, otherwise in English.
+"strategy", fairnessModel, emergencyControls, trustAssumptions, risk notes, test scenario names/steps —
+MUST follow OUTPUT LANGUAGE above. Do not mix languages in those fields.
 
 RUNTIME FACTS (ground truth):
 - The token is launched by Flap. The vault ONLY receives trade tax as plain BNB in receive() — msg.sender there is the protocol, never a user.
@@ -1074,6 +1079,7 @@ export async function planMechanicSpec(
   if (!apiKey) return fallback;
 
   try {
+    const outputLang = detectPromptLanguage(prompt);
     const { createAiClient } = await import("./ai-client.js");
     const client = createAiClient(apiKey);
     const completion = await client.chat.completions.create({
@@ -1082,8 +1088,11 @@ export async function planMechanicSpec(
       max_tokens: 24000,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: plannerSystemPrompt() },
-        { role: "user", content: prompt },
+        { role: "system", content: plannerSystemPrompt(outputLang) },
+        {
+          role: "user",
+          content: `${outputLanguageDirective(outputLang)}\n\nUser's vault idea:\n${prompt}`,
+        },
       ],
     });
     const raw = completion.choices[0]?.message?.content;

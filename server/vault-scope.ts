@@ -16,6 +16,8 @@
  * before generation proceeds — silent approximation is forbidden.
  */
 
+import { detectPromptLanguage, outputLanguageDirective } from "./prompt-language.js";
+
 export type ScopeVerdict =
   | "launch_ready_possible" //  Flap-compatible vault; can launch once compile/safety/test gates are green
   | "draft_only" //             expressible as a spec/draft, but depends on off-chain/external pieces — not launch-ready
@@ -234,6 +236,7 @@ export async function classifyVaultScope(
   if (!apiKey) return fallback;
 
   try {
+    const outputLang = detectPromptLanguage(prompt);
     const { createAiClient } = await import("./ai-client.js");
     const client = createAiClient(apiKey);
     const completion = await client.chat.completions.create({
@@ -272,12 +275,15 @@ verdict guide:
 - unsafe_or_unsupported: the mechanic is holder-hostile or cannot be honestly disclosed — refuse
 Be encouraging for launch-ready ideas; be honest (not dismissive) for the rest.
 
-LANGUAGE: the idea may be described in English or Simplified Chinese — read either fluently. "verdict" must
-stay the exact enum token in English (fixed schema value). Write "summary", "supported", "unsupported",
-"requiredForLaunch", and "suggestion" in Simplified Chinese when the user's prompt is primarily Chinese;
-otherwise write them in English.`,
+${outputLanguageDirective(outputLang)}
+"verdict" must stay the exact enum token in English (fixed schema value). Free-text fields
+("summary", "supported", "unsupported", "requiredForLaunch", "suggestion") MUST follow
+OUTPUT LANGUAGE above — do not mix languages.`,
         },
-        { role: "user", content: prompt },
+        {
+          role: "user",
+          content: `${outputLanguageDirective(outputLang)}\n\nUser's vault idea:\n${prompt}`,
+        },
       ],
     });
     const raw = completion.choices[0]?.message?.content;
