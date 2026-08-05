@@ -50,18 +50,19 @@ function NavLink({ label, to, onDone }: { label: string; to: string; onDone?: ()
   );
 }
 
-/** External plain-text nav link (opens in a new tab). */
-function ExtNavLink({ label, href, ariaLabel, onDone }: { label: string; href: string; ariaLabel: string; onDone?: () => void }) {
+/** Official X (Twitter) mark — next to the language switcher. */
+function XLogoLink({ ariaLabel }: { ariaLabel: string }) {
   return (
     <a
-      href={href}
+      href={X_PROFILE_URL}
       target="_blank"
       rel="noopener noreferrer"
       aria-label={ariaLabel}
-      onClick={() => onDone?.()}
-      className="text-[0.8rem] text-muted-foreground transition-colors hover:text-foreground"
+      className="flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:text-foreground"
     >
-      {label}
+      <svg viewBox="0 0 24 24" aria-hidden="true" className="size-3.5 fill-current">
+        <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+      </svg>
     </a>
   );
 }
@@ -109,11 +110,11 @@ export default function SiteHeader() {
           {links.map((l) => (
             <NavLink key={l.to} label={l.label} to={l.to} />
           ))}
-          <ExtNavLink label={t("common.nav.x")} href={X_PROFILE_URL} ariaLabel={t("common.nav.xAria")} />
         </nav>
 
         <div className="ml-auto flex items-center gap-2 md:ml-0">
           <LanguageToggle />
+          <XLogoLink ariaLabel={t("common.nav.xAria")} />
           <MetaMaskConnect />
           {/* The four links don't fit next to the wallet button on a phone, so
               below md they move into a dropdown instead of disappearing. */}
@@ -136,14 +137,6 @@ export default function SiteHeader() {
               <NavLink label={l.label} to={l.to} onDone={() => setMobileOpen(false)} />
             </div>
           ))}
-          <div className="py-1.5 text-left">
-            <ExtNavLink
-              label={t("common.nav.x")}
-              href={X_PROFILE_URL}
-              ariaLabel={t("common.nav.xAria")}
-              onDone={() => setMobileOpen(false)}
-            />
-          </div>
         </nav>
       )}
     </header>
